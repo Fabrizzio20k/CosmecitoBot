@@ -1,0 +1,31 @@
+---
+title: Unidad 1: Ingeniería de requisitos
+curso: Ingeniería de Software
+periodo: 2026-1
+unidad: 1
+semana: 2
+temas:
+  - requisitos funcionales
+  - requisitos no funcionales
+fuente: Material de la semana 2
+---
+
+# Unidad 1: Ingeniería de requisitos
+
+## Requisito funcional
+
+Describe una capacidad o comportamiento que el sistema debe proporcionar.
+
+Ejemplo: El sistema debe permitir al estudiante consultar sus notas usando su
+código universitario.
+
+## Requisito no funcional
+
+Describe una cualidad o restricción del sistema, no una funcionalidad puntual.
+
+Ejemplo: La consulta de notas debe responder en menos de dos segundos para el
+95 % de las solicitudes.
+
+## Criterios de calidad
+
+Un requisito debe ser claro, verificable, necesario, consistente y trazable.

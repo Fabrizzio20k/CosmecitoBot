@@ -1,7 +1,11 @@
+import asyncio
+
 import discord
 from discord.ext import commands
 
 from cosmecito_bot.config import Settings
+from cosmecito_bot.services.rag import RagService
+from cosmecito_bot.services.runtime_metrics import RuntimeMetrics
 
 COGS = (
     "cosmecito_bot.cogs.ping",
@@ -15,8 +19,18 @@ class CosmecitoBot(commands.Bot):
         intents = discord.Intents.default()
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.settings = settings
+        self.metrics = RuntimeMetrics()
+        self.rag = RagService(settings, self.metrics)
 
     async def setup_hook(self) -> None:
+        sync_result = await self.rag.sync()
+        print(
+            "📚 RAG sincronizado: "
+            f"{sync_result.added} nuevos, {sync_result.updated} actualizados, "
+            f"{sync_result.removed} eliminados, {sync_result.unchanged} sin cambios"
+        )
+        print(await asyncio.to_thread(self.metrics.report))
+
         for extension in COGS:
             await self.load_extension(extension)
 

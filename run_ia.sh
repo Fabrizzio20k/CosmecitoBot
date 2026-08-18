@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/Qwen3.5-9B-Q4_K_M.gguf}"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/bartowski/Qwen_Qwen3.5-9B-GGUF/resolve/main/Qwen_Qwen3.5-9B-Q4_K_M.gguf?download=true}"
+MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/Qwen3.5-4B-Q4_K_M.gguf}"
+MODEL_URL="${MODEL_URL:-https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf?download=true}"
 CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
 GPU_LAYERS="${GPU_LAYERS:-0}"
 MODE="${MODE:-web}"
@@ -13,9 +13,65 @@ if [[ "${1:-}" == "--web" ]]; then
     shift
 fi
 
-if [[ "$MODE" != "chat" && "$MODE" != "web" ]]; then
-    echo "MODE debe ser chat o web." >&2
+if [[ "${1:-}" == "--chat" ]]; then
+    MODE="chat"
+    shift
+fi
+
+if [[ "${1:-}" == "--embeddings" ]]; then
+    MODE="embeddings"
+    shift
+fi
+
+if [[ "$MODE" != "chat" && "$MODE" != "web" && "$MODE" != "embeddings" ]]; then
+    echo "MODE debe ser chat, web o embeddings." >&2
     exit 1
+fi
+
+if [[ "$MODE" == "embeddings" ]]; then
+    EMBEDDING_MODEL_PATH="${EMBEDDING_MODEL_PATH:-$PROJECT_DIR/models/qwen3-embedding-4b-q4_k_m.gguf}"
+    EMBEDDING_MODEL_URL="${EMBEDDING_MODEL_URL:-https://huggingface.co/enacimie/Qwen3-Embedding-4B-Q4_K_M-GGUF/resolve/main/qwen3-embedding-4b-q4_k_m.gguf?download=true}"
+    EMBEDDING_HOST="${EMBEDDING_HOST:-127.0.0.1}"
+    EMBEDDING_PORT="${EMBEDDING_PORT:-8081}"
+    EMBEDDING_CONTEXT_SIZE="${EMBEDDING_CONTEXT_SIZE:-2048}"
+    EMBEDDING_GPU_LAYERS="${EMBEDDING_GPU_LAYERS:-$GPU_LAYERS}"
+    EXECUTABLE_PATH="${LLAMA_SERVER:-}"
+
+    if [[ -n "$EXECUTABLE_PATH" ]]; then
+        LLAMA_COMMAND="$EXECUTABLE_PATH"
+    elif command -v llama-server >/dev/null 2>&1; then
+        LLAMA_COMMAND="$(command -v llama-server)"
+    elif [[ -x "$PROJECT_DIR/llama.cpp/build/bin/llama-server" ]]; then
+        LLAMA_COMMAND="$PROJECT_DIR/llama.cpp/build/bin/llama-server"
+    elif [[ -x "$PROJECT_DIR/llama.cpp/llama-server" ]]; then
+        LLAMA_COMMAND="$PROJECT_DIR/llama.cpp/llama-server"
+    else
+        echo "No se encontró llama-server. Instala llama.cpp." >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$EMBEDDING_MODEL_PATH" ]]; then
+        if ! command -v curl >/dev/null 2>&1; then
+            echo "No se encontró curl para descargar el modelo de embeddings." >&2
+            exit 1
+        fi
+
+        mkdir -p "$(dirname -- "$EMBEDDING_MODEL_PATH")"
+        echo "Descargando el modelo de embeddings en: $EMBEDDING_MODEL_PATH"
+        curl --fail --location --continue-at - --output "${EMBEDDING_MODEL_PATH}.part" "$EMBEDDING_MODEL_URL"
+        mv "${EMBEDDING_MODEL_PATH}.part" "$EMBEDDING_MODEL_PATH"
+    fi
+
+    echo "Embeddings Qwen3-Embedding-4B en http://$EMBEDDING_HOST:$EMBEDDING_PORT/v1/embeddings"
+    exec "$LLAMA_COMMAND" \
+        --model "$EMBEDDING_MODEL_PATH" \
+        --ctx-size "$EMBEDDING_CONTEXT_SIZE" \
+        --gpu-layers "$EMBEDDING_GPU_LAYERS" \
+        --embedding \
+        --pooling last \
+        --host "$EMBEDDING_HOST" \
+        --port "$EMBEDDING_PORT" \
+        "$@"
 fi
 
 if [[ "$MODE" == "web" ]]; then

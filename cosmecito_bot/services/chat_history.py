@@ -64,27 +64,40 @@ class ChatHistory:
                 (user_id, channel_id, role, content),
             )
 
-    def replace_summary(
+    def discard_messages(
         self,
         user_id: int,
         channel_id: int,
-        summary: str,
         message_ids: list[int],
     ) -> None:
-        placeholders = ", ".join("?" for _ in message_ids)
+        """Elimina mensajes concretos y cualquier resumen heredado del chat."""
+        with self._connect() as connection:
+            if message_ids:
+                placeholders = ", ".join("?" for _ in message_ids)
+                connection.execute(
+                    f"""
+                    DELETE FROM messages
+                    WHERE user_id = ? AND channel_id = ? AND id IN ({placeholders})
+                    """,
+                    [user_id, channel_id, *message_ids],
+                )
+            connection.execute(
+                """
+                DELETE FROM conversations
+                WHERE user_id = ? AND channel_id = ?
+                """,
+                (user_id, channel_id),
+            )
+
+    def clear_summary(self, user_id: int, channel_id: int) -> None:
+        """Quita la memoria resumida usada por versiones anteriores del bot."""
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO conversations (user_id, channel_id, summary)
-                VALUES (?, ?, ?)
-                ON CONFLICT(user_id, channel_id)
-                DO UPDATE SET summary = excluded.summary
+                DELETE FROM conversations
+                WHERE user_id = ? AND channel_id = ?
                 """,
-                (user_id, channel_id, summary),
-            )
-            connection.execute(
-                f"DELETE FROM messages WHERE id IN ({placeholders})",
-                message_ids,
+                (user_id, channel_id),
             )
 
     def _connect(self) -> sqlite3.Connection:

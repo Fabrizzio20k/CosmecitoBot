@@ -1,48 +1,96 @@
 # CosmecitoBot
 
-Bot de Discord multifuncional para el curso de Ingeniería de Software.
+Bot de Discord para el curso de Ingeniería de Software. Incluye chat local con
+RAG, creación de memes y un comando de diagnóstico.
 
-## Estructura
+## Requisitos
 
-```text
-.
-├── main.py                   # Punto de entrada: crea y ejecuta el bot
-├── cosmecito_bot/
-│   ├── config.py              # Variables de entorno y configuración
-│   ├── bot.py                 # Ciclo de vida y carga de extensiones
-│   └── cogs/                  # Módulos de comandos/eventos
-│       └── ping.py
-└── .env                       # Secretos locales, no se versiona
+- Python y las dependencias de `requirements.txt`.
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) instalado, con
+  `llama-server` disponible en el `PATH`.
+- Un bot de Discord con su token y el ID del servidor de pruebas.
+
+## Inicio rápido
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-Cada funcionalidad nueva debe ir en un cog. Por ejemplo, los comandos de
-música vivirían en `cosmecito_bot/cogs/music.py` y se registrarían en `COGS`
-en `cosmecito_bot/bot.py`.
+Completa `DISCORD_TOKEN` y `DISCORD_GUILD_ID` en `.env`. Luego, abre tres
+terminales en la raíz del proyecto:
 
-## Configuración
+```bash
+# Terminal 1: modelo de chat (puerto 8080)
+MODE=web ./run_ia.sh
 
-1. Copia `.env.example` como `.env`.
-2. Introduce `DISCORD_TOKEN` y `DISCORD_GUILD_ID`.
-3. Ejecuta el bot:
+# Terminal 2: modelo de embeddings para RAG (puerto 8081)
+MODE=embeddings ./run_ia.sh
 
-   ```bash
-   python main.py
-   ```
+# Terminal 3: bot de Discord
+python main.py
+```
 
-## Desarrollo con reinicio automático
+Los modelos GGUF se descargan automáticamente la primera vez. El chat usa
+Qwen3.5 4B Q4 por defecto; puedes cambiar la ruta, URL, contexto o capas GPU
+mediante variables de entorno al ejecutar `run_ia.sh`.
 
-Mientras uses `watchfiles`, establece primero esta variable en `.env`:
+## Comandos
+
+- `/chat mensaje:` conversa con el modelo y el material del curso.
+- `/meme imagen: texto:` genera un meme. Separa texto superior e inferior con
+  `|`.
+- `/ping` comprueba que el bot esté conectado.
+
+`/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
+máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
+descartan.
+
+## Conocimiento del curso (RAG)
+
+Guarda archivos Markdown en `data/knowledge/`. Un archivo sencillo funciona:
+
+```md
+# Semana 1: Requisitos
+
+## Entrega
+
+La primera entrega vence el 20 de agosto.
+```
+
+En cada inicio, el bot detecta archivos nuevos, modificados o eliminados y
+actualiza únicamente esas partes del índice Zvec. Usa
+`data/knowledge/ejemplo-requisitos.md.example` como referencia. El índice se
+guarda en `data/rag/` y no debe versionarse.
+
+Si cambias el modelo de embeddings o `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP`,
+elimina `data/rag/` una vez y reinicia el bot para reconstruir el índice.
+
+## Configuración útil
+
+`.env.example` contiene todas las variables. Las más habituales son:
 
 ```env
-DISCORD_SYNC_COMMANDS=false
+LLAMA_CPP_CONTEXT_TOKENS=8192
+LLAMA_CPP_MAX_RESPONSE_TOKENS=256
+CHAT_RATE_LIMIT_SECONDS=10
+CHAT_MAX_RECENT_MESSAGES=10
+RAG_TOP_K=4
 ```
 
-Luego inicia el watcher:
+El bot muestra en la terminal tiempos de indexado, embeddings, búsqueda,
+generación y uso de CPU/RAM.
+
+Para desarrollo con reinicio automático, deja
+`DISCORD_SYNC_COMMANDS=false` y ejecuta:
 
 ```bash
 watchfiles --filter python "python main.py"
 ```
 
-Cuando agregues, elimines o modifiques un slash command, detén el watcher,
-cambia temporalmente `DISCORD_SYNC_COMMANDS=true`, ejecuta `python main.py`
-una vez y vuelve a dejarlo en `false`.
+Activa temporalmente `DISCORD_SYNC_COMMANDS=true` cuando agregues o cambies un
+slash command.
+
+Consulta los cambios del proyecto en [CHANGELOG.md](CHANGELOG.md).

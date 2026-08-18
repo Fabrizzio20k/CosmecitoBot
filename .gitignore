@@ -252,4 +252,5 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,windows,linux
 
 models/
-data/
+data/chat_history.sqlite3
+data/rag/
