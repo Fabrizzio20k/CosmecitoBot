@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -15,6 +16,9 @@ class Settings:
     llama_cpp_base_url: str
     llama_cpp_model: str
     llama_cpp_timeout_seconds: float
+    llama_cpp_context_tokens: int
+    llama_cpp_max_response_tokens: int
+    chat_database_path: Path
 
 
 def _get_required_env(name: str) -> str:
@@ -47,6 +51,21 @@ def _get_positive_float_env(name: str, *, default: float) -> float:
     return parsed_value
 
 
+def _get_positive_int_env(name: str, *, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+
+    try:
+        parsed_value = int(value)
+    except ValueError as error:
+        raise RuntimeError(f"{name} debe ser un numero entero") from error
+
+    if parsed_value <= 0:
+        raise RuntimeError(f"{name} debe ser mayor que cero")
+    return parsed_value
+
+
 @lru_cache
 def get_settings() -> Settings:
     """Carga una vez la configuracion desde el archivo .env y el entorno."""
@@ -72,5 +91,16 @@ def get_settings() -> Settings:
         llama_cpp_timeout_seconds=_get_positive_float_env(
             "LLAMA_CPP_TIMEOUT_SECONDS",
             default=600,
+        ),
+        llama_cpp_context_tokens=_get_positive_int_env(
+            "LLAMA_CPP_CONTEXT_TOKENS",
+            default=8192,
+        ),
+        llama_cpp_max_response_tokens=_get_positive_int_env(
+            "LLAMA_CPP_MAX_RESPONSE_TOKENS",
+            default=256,
+        ),
+        chat_database_path=Path(
+            os.getenv("CHAT_DATABASE_PATH", "data/chat_history.sqlite3"),
         ),
     )

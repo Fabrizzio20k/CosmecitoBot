@@ -175,6 +175,7 @@ celerybeat.pid
 .env
 .venv
 models/*.gguf
+data/*.sqlite3
 env/
 venv/
 ENV/
@@ -251,3 +252,4 @@ $RECYCLE.BIN/
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,windows,linux
 
 models/
+data/
