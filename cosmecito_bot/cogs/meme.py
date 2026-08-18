@@ -18,26 +18,24 @@ class MemeCog(commands.Cog):
     @app_commands.command(name="meme", description="Crea un meme a partir de una imagen")
     @app_commands.describe(
         imagen="La imagen que se usará como base",
-        texto_arriba="Texto de la parte superior",
-        texto_abajo="Texto de la parte inferior",
+        texto="Texto del meme. Usa | para separar arriba y abajo",
     )
     async def meme(
         self,
         interaction: discord.Interaction,
         imagen: discord.Attachment,
-        texto_arriba: str | None = None,
-        texto_abajo: str | None = None,
+        texto: str,
     ) -> None:
-        if not texto_arriba and not texto_abajo:
+        if not texto.strip():
             await interaction.response.send_message(
-                "Escribe texto arriba, abajo o en ambos campos.",
+                "Escribe el texto que quieres poner en el meme.",
                 ephemeral=True,
             )
             return
 
-        if len(texto_arriba or "") + len(texto_abajo or "") > self.max_text_length:
+        if len(texto) > self.max_text_length:
             await interaction.response.send_message(
-                "El texto combinado no puede superar 500 caracteres.",
+                "El texto no puede superar 500 caracteres.",
                 ephemeral=True,
             )
             return
@@ -50,12 +48,15 @@ class MemeCog(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True)
+        texto_arriba, separador, texto_abajo = texto.partition("|")
+        if not separador:
+            texto_abajo = ""
 
         try:
             meme_bytes = self.generator.generate(
                 await imagen.read(),
-                texto_arriba or "",
-                texto_abajo or "",
+                texto_arriba,
+                texto_abajo,
             )
         except MemeGenerationError as error:
             await interaction.edit_original_response(content=str(error))
