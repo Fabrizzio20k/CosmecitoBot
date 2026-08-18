@@ -15,6 +15,8 @@ y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 - Métricas en terminal de tiempos, CPU y RAM del bot, sistema y servidores
   llama.cpp.
 - Límite de una pregunta de chat cada 10 segundos por usuario.
+- Docker Compose para iniciar bot, chat y embeddings con modelos y datos
+  persistentes.
 - Este README y changelog.
 
 ### Changed

@@ -1,0 +1,9 @@
+.git
+.codegraph
+.venv
+__pycache__
+*.py[cod]
+.env
+models
+data/rag
+data/chat_history.sqlite3

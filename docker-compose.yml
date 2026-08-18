@@ -1,0 +1,70 @@
+services:
+  chat:
+    build:
+      context: .
+      dockerfile: docker/llama.Dockerfile
+    image: cosmecitobot-llama:local
+    environment:
+      MODE: web
+      LLAMA_SERVER: /app/llama-server
+      HOST: 0.0.0.0
+      PORT: "8080"
+      MODEL_PATH: /models/${CHAT_MODEL_FILE:-Qwen3.5-4B-Q4_K_M.gguf}
+      MODEL_URL: ${CHAT_MODEL_URL:-https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf?download=true}
+      CONTEXT_SIZE: ${LLAMA_CPP_CONTEXT_TOKENS:-8192}
+      GPU_LAYERS: ${CHAT_GPU_LAYERS:-0}
+    volumes:
+      - ./models:/models
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10m
+    restart: unless-stopped
+
+  embeddings:
+    image: cosmecitobot-llama:local
+    depends_on:
+      chat:
+        condition: service_started
+    environment:
+      MODE: embeddings
+      LLAMA_SERVER: /app/llama-server
+      EMBEDDING_HOST: 0.0.0.0
+      EMBEDDING_PORT: "8081"
+      EMBEDDING_MODEL_PATH: /models/${EMBEDDING_MODEL_FILE:-qwen3-embedding-4b-q4_k_m.gguf}
+      EMBEDDING_MODEL_URL: ${EMBEDDING_MODEL_URL:-https://huggingface.co/enacimie/Qwen3-Embedding-4B-Q4_K_M-GGUF/resolve/main/qwen3-embedding-4b-q4_k_m.gguf?download=true}
+      EMBEDDING_CONTEXT_SIZE: ${EMBEDDING_CONTEXT_SIZE:-2048}
+      EMBEDDING_GPU_LAYERS: ${EMBEDDING_GPU_LAYERS:-0}
+    volumes:
+      - ./models:/models
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 10m
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      LLAMA_CPP_BASE_URL: http://chat:8080/v1
+      RAG_EMBEDDING_BASE_URL: http://embeddings:8081/v1
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      chat:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+    restart: unless-stopped

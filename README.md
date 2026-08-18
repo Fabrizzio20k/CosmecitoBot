@@ -19,8 +19,37 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Completa `DISCORD_TOKEN` y `DISCORD_GUILD_ID` en `.env`. Luego, abre tres
-terminales en la raíz del proyecto:
+Completa `DISCORD_TOKEN` y `DISCORD_GUILD_ID` en `.env`.
+
+### Docker Compose
+
+Con Docker Desktop instalado, esta es la forma recomendada de iniciar todos
+los servicios:
+
+```bash
+docker compose up --build -d
+docker compose logs -f
+```
+
+Compose levanta el bot, el servidor de chat en `8080` y el de embeddings en
+`8081`. Los modelos se guardan en `models/` y el índice/historial en `data/`,
+por lo que sobreviven a reinicios. Para detenerlos:
+
+```bash
+docker compose down
+```
+
+En macOS, Docker ejecuta llama.cpp en una máquina Linux y no aprovecha Metal;
+para usar aceleración Metal conviene ejecutar los dos servidores de llama.cpp
+de forma nativa. Consulta consumo y estado de contenedores con:
+
+```bash
+docker compose stats
+```
+
+### Ejecución nativa
+
+Como alternativa, abre tres terminales en la raíz del proyecto:
 
 ```bash
 # Terminal 1: modelo de chat (puerto 8080)
