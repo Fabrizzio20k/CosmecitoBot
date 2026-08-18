@@ -6,6 +6,7 @@ from cosmecito_bot.config import Settings
 COGS = (
     "cosmecito_bot.cogs.ping",
     "cosmecito_bot.cogs.meme",
+    "cosmecito_bot.cogs.chat",
 )
 
 
