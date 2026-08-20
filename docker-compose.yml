@@ -9,12 +9,12 @@ services:
       LLAMA_SERVER: /app/llama-server
       HOST: 0.0.0.0
       PORT: "8080"
-      MODEL_PATH: /models/${CHAT_MODEL_FILE:-Qwen3.5-4B-Q4_K_M.gguf}
-      MODEL_URL: ${CHAT_MODEL_URL:-https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf?download=true}
+      MODEL_PATH: /models/${CHAT_MODEL_FILE:-Qwen2.5-3B-Instruct-Q4_K_M.gguf}
+      MODEL_URL: ${CHAT_MODEL_URL:-https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf?download=true}
       CONTEXT_SIZE: ${LLAMA_CPP_CONTEXT_TOKENS:-8192}
       GPU_LAYERS: ${CHAT_GPU_LAYERS:-0}
     volumes:
-      - ./models:/models
+      - llama-models:/models
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 5s
@@ -38,7 +38,7 @@ services:
       EMBEDDING_CONTEXT_SIZE: ${EMBEDDING_CONTEXT_SIZE:-2048}
       EMBEDDING_GPU_LAYERS: ${EMBEDDING_GPU_LAYERS:-0}
     volumes:
-      - ./models:/models
+      - llama-models:/models
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8081/health"]
       interval: 5s
@@ -55,12 +55,20 @@ services:
       - ${BOT_ENV_FILE:-.env}
     environment:
       LLAMA_CPP_BASE_URL: http://chat:8080/v1
+      LLAMA_CPP_MODEL: ${CHAT_MODEL_FILE:-Qwen2.5-3B-Instruct-Q4_K_M.gguf}
       RAG_EMBEDDING_BASE_URL: http://embeddings:8081/v1
+      RAG_KNOWLEDGE_PATH: /app/data/knowledge
+      CHAT_DATABASE_PATH: /app/state/chat_history.sqlite3
+      RAG_DATABASE_PATH: /app/state/rag
     volumes:
-      - ./data:/app/data
+      - bot-state:/app/state
     depends_on:
       chat:
         condition: service_healthy
       embeddings:
         condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  llama-models:
+  bot-state:

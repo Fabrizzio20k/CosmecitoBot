@@ -63,7 +63,7 @@ python main.py
 ```
 
 Los modelos GGUF se descargan automáticamente la primera vez. El chat usa
-Qwen3.5 4B Q4 por defecto; puedes cambiar la ruta, URL, contexto o capas GPU
+Qwen2.5 3B Instruct Q4_K_M por defecto; puedes cambiar la ruta, URL, contexto o capas GPU
 mediante variables de entorno al ejecutar `run_ia.sh`.
 
 ## Comandos

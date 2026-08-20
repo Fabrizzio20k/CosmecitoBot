@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/Qwen3.5-4B-Q4_K_M.gguf}"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/bartowski/Qwen_Qwen3.5-4B-GGUF/resolve/main/Qwen_Qwen3.5-4B-Q4_K_M.gguf?download=true}"
+MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf}"
+MODEL_URL="${MODEL_URL:-https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf?download=true}"
 CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
 GPU_LAYERS="${GPU_LAYERS:-0}"
 MODE="${MODE:-web}"
@@ -113,8 +113,7 @@ COMMON_ARGS=(
     --gpu-layers "$GPU_LAYERS" \
     --jinja \
     --reasoning off \
-    --context-shift \
-    --spec-type draft-mtp
+    --context-shift
 )
 
 if [[ "$MODE" == "web" ]]; then
