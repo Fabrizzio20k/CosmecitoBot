@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf}"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf?download=true}"
+MODEL_PATH="${MODEL_PATH:-$PROJECT_DIR/models/qwen2.5-1.5b-instruct-q4_k_m.gguf}"
+MODEL_URL="${MODEL_URL:-https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf?download=true}"
 CONTEXT_SIZE="${CONTEXT_SIZE:-8192}"
 GPU_LAYERS="${GPU_LAYERS:-0}"
 MODE="${MODE:-web}"

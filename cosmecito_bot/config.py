@@ -125,7 +125,7 @@ def get_settings() -> Settings:
             "LLAMA_CPP_BASE_URL",
             "http://127.0.0.1:8080/v1",
         ).rstrip("/"),
-        llama_cpp_model=os.getenv("LLAMA_CPP_MODEL", "Qwen2.5-3B-Instruct-Q4_K_M.gguf"),
+        llama_cpp_model=os.getenv("LLAMA_CPP_MODEL", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
         llama_cpp_timeout_seconds=_get_positive_float_env(
             "LLAMA_CPP_TIMEOUT_SECONDS",
             default=600,

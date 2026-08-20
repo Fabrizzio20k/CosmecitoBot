@@ -21,7 +21,7 @@ y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
 ### Changed
 
-- El modelo de chat predeterminado es Qwen2.5 3B Instruct Q4_K_M para reducir consumo y
+- El modelo de chat predeterminado es Qwen2.5 1.5B Instruct Q4_K_M para reducir consumo y
   latencia.
 - El historial de chat conserva solo los 10 mensajes más recientes por usuario
   y canal; los anteriores se descartan sin generar resúmenes.
