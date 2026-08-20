@@ -254,6 +254,4 @@ $RECYCLE.BIN/
 models/
 data/chat_history.sqlite3
 bot/data/chat_history.sqlite3
-ui/node_modules/
-ui/.next/
 data/

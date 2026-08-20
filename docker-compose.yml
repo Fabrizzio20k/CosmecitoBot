@@ -53,6 +53,40 @@ services:
       start_period: 10m
     restart: unless-stopped
 
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    env_file:
+      - ${BOT_ENV_FILE:-.env}
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      RAG_EMBEDDING_BASE_URL: http://embeddings:8081/v1
+    depends_on:
+      qdrant:
+        condition: service_started
+      embeddings:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      - "${UI_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
   bot:
     build:
       context: ./bot

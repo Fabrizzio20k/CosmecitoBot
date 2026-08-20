@@ -33,7 +33,8 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
-Compose levanta el bot, Qdrant y los servidores internos de chat y embeddings.
+Compose levanta el bot, la API de documentos, la UI, Qdrant y los servidores
+internos de chat y embeddings.
 Los modelos, el historial y los vectores se guardan en volúmenes Docker, por lo
 que sobreviven a reinicios. Qdrant no publica puertos al host: solo los
 servicios de esta aplicación pueden acceder a él. Qdrant usa la imagen `latest`
@@ -42,6 +43,10 @@ en cada reconstrucción. Para detenerlos:
 ```bash
 docker compose down
 ```
+
+La UI queda disponible en `http://localhost:3000` (o el valor de `UI_PORT`).
+Es el único servicio de administración expuesto al host: la UI usa un proxy
+interno hacia la API y la API es la única que escribe en Qdrant.
 
 En macOS, Docker ejecuta llama.cpp en una máquina Linux y no aprovecha Metal;
 para usar aceleración Metal conviene ejecutar los dos servidores de llama.cpp
@@ -85,10 +90,9 @@ descartan.
 ## Conocimiento del curso (RAG)
 
 El bot consulta una colección de Qdrant ya indexada; no lee ni indexa archivos
-al iniciar. La futura API de administración será responsable de subir,
-fragmentar y guardar documentos en esa colección. Hasta que exista esa API o
-un proceso de ingesta, una colección vacía implica que el bot responderá sin
-contexto RAG.
+al iniciar. La UI permite subir archivos `.md`, `.markdown` y `.txt`,
+reemplazarlos o eliminarlos. La API los fragmenta, genera embeddings y los
+guarda en Qdrant; estarán disponibles para el bot al terminar la carga.
 
 Qdrant debe tener la colección definida por `QDRANT_COLLECTION` y un vector
 nombrado `QDRANT_VECTOR_NAME` (por defecto, `embedding`). Cada punto debe
@@ -106,7 +110,14 @@ CHAT_MAX_RECENT_MESSAGES=10
 RAG_TOP_K=4
 RAG_MIN_SCORE=0.45
 QDRANT_COLLECTION=course_knowledge
+API_ADMIN_TOKEN=un_secreto_largo
+UI_PORT=3000
 ```
+
+`API_ADMIN_TOKEN` es obligatorio para la API. La UI lo solicita al usuario y
+lo reenvía en cada operación; no se incluye en el bundle ni se guarda en el
+navegador. Para generar uno, puedes usar un gestor de contraseñas o un valor
+aleatorio de al menos 32 caracteres.
 
 El bot muestra en la terminal tiempos de embeddings, búsqueda, generación y
 uso de CPU/RAM.
