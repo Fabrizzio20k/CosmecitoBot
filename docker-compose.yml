@@ -15,8 +15,6 @@ services:
       GPU_LAYERS: ${CHAT_GPU_LAYERS:-0}
     volumes:
       - ./models:/models
-    ports:
-      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 5s
@@ -41,8 +39,6 @@ services:
       EMBEDDING_GPU_LAYERS: ${EMBEDDING_GPU_LAYERS:-0}
     volumes:
       - ./models:/models
-    ports:
-      - "127.0.0.1:8081:8081"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8081/health"]
       interval: 5s

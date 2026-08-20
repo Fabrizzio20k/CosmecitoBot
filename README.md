@@ -31,9 +31,9 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
-Compose levanta el bot, el servidor de chat en `8080` y el de embeddings en
-`8081`. Los modelos se guardan en `models/` y el índice/historial en `data/`,
-por lo que sobreviven a reinicios. Para detenerlos:
+Compose levanta el bot y los servidores internos de chat y embeddings. Los
+modelos se guardan en `models/` y el índice/historial en `data/`, por lo que
+sobreviven a reinicios. Para detenerlos:
 
 ```bash
 docker compose down
