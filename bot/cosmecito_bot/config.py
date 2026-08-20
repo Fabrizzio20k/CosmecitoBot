@@ -21,14 +21,13 @@ class Settings:
     chat_database_path: Path
     chat_rate_limit_seconds: float
     chat_max_recent_messages: int
-    rag_knowledge_path: Path
-    rag_database_path: Path
     rag_embedding_base_url: str
     rag_embedding_model: str
     rag_top_k: int
-    rag_max_distance: float
-    rag_chunk_size: int
-    rag_chunk_overlap: int
+    rag_min_score: float
+    qdrant_url: str
+    qdrant_collection: str
+    qdrant_vector_name: str
 
 
 def _get_required_env(name: str) -> str:
@@ -78,21 +77,6 @@ def _get_positive_int_env(name: str, *, default: int, minimum: int = 1) -> int:
     return parsed_value
 
 
-def _get_nonnegative_int_env(name: str, *, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-
-    try:
-        parsed_value = int(value)
-    except ValueError as error:
-        raise RuntimeError(f"{name} debe ser un numero entero") from error
-
-    if parsed_value < 0:
-        raise RuntimeError(f"{name} no puede ser negativo")
-    return parsed_value
-
-
 @lru_cache
 def get_settings() -> Settings:
     """Carga una vez la configuracion desde el archivo .env y el entorno."""
@@ -103,17 +87,6 @@ def get_settings() -> Settings:
         parsed_guild_id = int(guild_id)
     except ValueError as error:
         raise RuntimeError("DISCORD_GUILD_ID debe ser un numero entero") from error
-
-    rag_chunk_size = _get_positive_int_env(
-        "RAG_CHUNK_SIZE",
-        default=1_600,
-    )
-    rag_chunk_overlap = _get_nonnegative_int_env(
-        "RAG_CHUNK_OVERLAP",
-        default=200,
-    )
-    if rag_chunk_overlap >= rag_chunk_size:
-        raise RuntimeError("RAG_CHUNK_OVERLAP debe ser menor que RAG_CHUNK_SIZE")
 
     return Settings(
         discord_token=_get_required_env("DISCORD_TOKEN"),
@@ -150,12 +123,6 @@ def get_settings() -> Settings:
             default=10,
             minimum=2,
         ),
-        rag_knowledge_path=Path(
-            os.getenv("RAG_KNOWLEDGE_PATH", "data/knowledge"),
-        ),
-        rag_database_path=Path(
-            os.getenv("RAG_DATABASE_PATH", "data/rag"),
-        ),
         rag_embedding_base_url=os.getenv(
             "RAG_EMBEDDING_BASE_URL",
             "http://127.0.0.1:8081/v1",
@@ -165,10 +132,8 @@ def get_settings() -> Settings:
             "qwen3-embedding-4b-q4_k_m.gguf",
         ),
         rag_top_k=_get_positive_int_env("RAG_TOP_K", default=4),
-        rag_max_distance=_get_positive_float_env(
-            "RAG_MAX_DISTANCE",
-            default=0.55,
-        ),
-        rag_chunk_size=rag_chunk_size,
-        rag_chunk_overlap=rag_chunk_overlap,
+        rag_min_score=_get_positive_float_env("RAG_MIN_SCORE", default=0.45),
+        qdrant_url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333").rstrip("/"),
+        qdrant_collection=os.getenv("QDRANT_COLLECTION", "course_knowledge"),
+        qdrant_vector_name=os.getenv("QDRANT_VECTOR_NAME", "embedding"),
     )

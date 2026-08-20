@@ -1,4 +1,10 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    restart: unless-stopped
+
   chat:
     build:
       context: .
@@ -49,7 +55,7 @@ services:
 
   bot:
     build:
-      context: .
+      context: ./bot
       dockerfile: Dockerfile
     env_file:
       - ${BOT_ENV_FILE:-.env}
@@ -57,9 +63,8 @@ services:
       LLAMA_CPP_BASE_URL: http://chat:8080/v1
       LLAMA_CPP_MODEL: ${CHAT_MODEL_FILE:-qwen2.5-1.5b-instruct-q4_k_m.gguf}
       RAG_EMBEDDING_BASE_URL: http://embeddings:8081/v1
-      RAG_KNOWLEDGE_PATH: /app/data/knowledge
       CHAT_DATABASE_PATH: /app/state/chat_history.sqlite3
-      RAG_DATABASE_PATH: /app/state/rag
+      QDRANT_URL: http://qdrant:6333
     volumes:
       - bot-state:/app/state
     depends_on:
@@ -67,8 +72,11 @@ services:
         condition: service_healthy
       embeddings:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   llama-models:
   bot-state:
+  qdrant-storage:

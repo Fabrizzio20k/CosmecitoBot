@@ -23,12 +23,7 @@ class CosmecitoBot(commands.Bot):
         self.rag = RagService(settings, self.metrics)
 
     async def setup_hook(self) -> None:
-        sync_result = await self.rag.sync()
-        print(
-            "📚 RAG sincronizado: "
-            f"{sync_result.added} nuevos, {sync_result.updated} actualizados, "
-            f"{sync_result.removed} eliminados, {sync_result.unchanged} sin cambios"
-        )
+        print(await self.rag.collection_status())
         print(await asyncio.to_thread(self.metrics.report))
 
         for extension in COGS:
@@ -48,3 +43,7 @@ class CosmecitoBot(commands.Bot):
         print(f"✅ ID del bot: {self.user.id if self.user else 'desconocido'}")
         print(f"✅ Servidor de prueba: {self.settings.guild_id}")
         print("-----------------------------")
+
+    async def close(self) -> None:
+        await self.rag.close()
+        await super().close()

@@ -10,6 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 COPY cosmecito_bot ./cosmecito_bot
-COPY data/knowledge ./data/knowledge
 
 CMD ["python", "main.py"]

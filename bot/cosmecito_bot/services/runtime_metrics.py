@@ -24,11 +24,9 @@ class RuntimeMetrics:
     """Métricas ligeras del bot y de los llama-server locales."""
 
     phase_labels = {
-        "indexing": "Indexado incremental",
-        "index_embedding": "Embeddings al indexar",
         "retrieval": "Recuperación RAG",
         "query_embedding": "Embedding de consulta",
-        "vector_search": "Búsqueda en Zvec",
+        "vector_search": "Búsqueda en Qdrant",
         "history_trim": "Limpieza del historial",
         "chat_generation": "Generación del chat",
     }

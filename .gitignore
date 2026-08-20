@@ -253,4 +253,5 @@ $RECYCLE.BIN/
 
 models/
 data/chat_history.sqlite3
-data/rag/
+bot/data/chat_history.sqlite3
+data/

@@ -1,7 +1,9 @@
 # CosmecitoBot
 
 Bot de Discord para el curso de Ingeniería de Software. Incluye chat local con
-RAG, creación de memes y un comando de diagnóstico.
+RAG, creación de memes y un comando de diagnóstico. El servicio del bot vive
+en [`bot/`](bot/); la raíz conserva la infraestructura compartida y Docker
+Compose.
 
 ## Requisitos
 
@@ -15,7 +17,7 @@ RAG, creación de memes y un comando de diagnóstico.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r bot/requirements.txt
 cp .env.example .env
 ```
 
@@ -31,9 +33,11 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
-Compose levanta el bot y los servidores internos de chat y embeddings. Los
-modelos se guardan en `models/` y el índice/historial en `data/`, por lo que
-sobreviven a reinicios. Para detenerlos:
+Compose levanta el bot, Qdrant y los servidores internos de chat y embeddings.
+Los modelos, el historial y los vectores se guardan en volúmenes Docker, por lo
+que sobreviven a reinicios. Qdrant no publica puertos al host: solo los
+servicios de esta aplicación pueden acceder a él. Qdrant usa la imagen `latest`
+en cada reconstrucción. Para detenerlos:
 
 ```bash
 docker compose down
@@ -59,6 +63,7 @@ MODE=web ./run_ia.sh
 MODE=embeddings ./run_ia.sh
 
 # Terminal 3: bot de Discord
+cd bot
 python main.py
 ```
 
@@ -79,23 +84,15 @@ descartan.
 
 ## Conocimiento del curso (RAG)
 
-Guarda archivos Markdown en `data/knowledge/`. Un archivo sencillo funciona:
+El bot consulta una colección de Qdrant ya indexada; no lee ni indexa archivos
+al iniciar. La futura API de administración será responsable de subir,
+fragmentar y guardar documentos en esa colección. Hasta que exista esa API o
+un proceso de ingesta, una colección vacía implica que el bot responderá sin
+contexto RAG.
 
-```md
-# Semana 1: Requisitos
-
-## Entrega
-
-La primera entrega vence el 20 de agosto.
-```
-
-En cada inicio, el bot detecta archivos nuevos, modificados o eliminados y
-actualiza únicamente esas partes del índice Zvec. Usa
-`data/knowledge/ejemplo-requisitos.md.example` como referencia. El índice se
-guarda en `data/rag/` y no debe versionarse.
-
-Si cambias el modelo de embeddings o `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP`,
-elimina `data/rag/` una vez y reinicia el bot para reconstruir el índice.
+Qdrant debe tener la colección definida por `QDRANT_COLLECTION` y un vector
+nombrado `QDRANT_VECTOR_NAME` (por defecto, `embedding`). Cada punto debe
+incluir en su payload `content`, `source`, `title` y `section`.
 
 ## Configuración útil
 
@@ -107,16 +104,18 @@ LLAMA_CPP_MAX_RESPONSE_TOKENS=256
 CHAT_RATE_LIMIT_SECONDS=10
 CHAT_MAX_RECENT_MESSAGES=10
 RAG_TOP_K=4
+RAG_MIN_SCORE=0.45
+QDRANT_COLLECTION=course_knowledge
 ```
 
-El bot muestra en la terminal tiempos de indexado, embeddings, búsqueda,
-generación y uso de CPU/RAM.
+El bot muestra en la terminal tiempos de embeddings, búsqueda, generación y
+uso de CPU/RAM.
 
 Para desarrollo con reinicio automático, deja
 `DISCORD_SYNC_COMMANDS=false` y ejecuta:
 
 ```bash
-watchfiles --filter python "python main.py"
+cd bot && watchfiles --filter python "python main.py"
 ```
 
 Activa temporalmente `DISCORD_SYNC_COMMANDS=true` cuando agregues o cambies un
