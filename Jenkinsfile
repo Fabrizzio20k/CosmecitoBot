@@ -17,8 +17,12 @@ pipeline {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
 
-                        docker compose --env-file "$BOT_ENV_FILE" down
-                        docker compose --env-file "$BOT_ENV_FILE" up --build --detach --wait --wait-timeout 900
+                        set -a
+                        source "$BOT_ENV_FILE"
+                        set +a
+
+                        docker compose down
+                        docker compose up --build --detach --wait --wait-timeout 900
 
                         curl --fail --silent --show-error http://127.0.0.1:8080/health
                         curl --fail --silent --show-error http://127.0.0.1:8081/health
