@@ -1,6 +1,6 @@
 "use client";
 
-import { type ChangeEvent, useEffect, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
 
 type DocumentSummary = {
   id: string;
@@ -144,8 +144,15 @@ export default function Home() {
     setMessage("Documento nuevo sin guardar.");
   }
 
+  function handleKeyboardShortcut(event: KeyboardEvent<HTMLElement>) {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      if (!busy) void saveDocument();
+    }
+  }
+
   return (
-    <main className="workspace">
+    <main className="workspace" onKeyDown={handleKeyboardShortcut}>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">C</span>
