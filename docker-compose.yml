@@ -80,8 +80,9 @@ services:
       dockerfile: Dockerfile
     environment:
       API_INTERNAL_URL: http://api:8000
-    ports:
-      - "${UI_PORT:-3000}:3000"
+    networks:
+      - default
+      - proxy_net
     depends_on:
       api:
         condition: service_healthy
@@ -114,3 +115,9 @@ volumes:
   llama-models:
   bot-state:
   qdrant-storage:
+
+networks:
+  default:
+    internal: true
+  proxy_net:
+    external: true

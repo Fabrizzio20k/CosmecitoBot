@@ -44,9 +44,10 @@ en cada reconstrucción. Para detenerlos:
 docker compose down
 ```
 
-La UI queda disponible en `http://localhost:3000` (o el valor de `UI_PORT`).
-Es el único servicio de administración expuesto al host: la UI usa un proxy
-interno hacia la API y la API es la única que escribe en Qdrant.
+La UI no publica puertos al host. Se conecta a la red Docker externa
+`proxy_net` para que Caddy la exponga; el resto de servicios permanece en la
+red interna privada de Compose. La UI usa un proxy interno hacia la API y la
+API es la única que escribe en Qdrant.
 
 En macOS, Docker ejecuta llama.cpp en una máquina Linux y no aprovecha Metal;
 para usar aceleración Metal conviene ejecutar los dos servidores de llama.cpp
