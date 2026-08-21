@@ -9,7 +9,7 @@ type DocumentSummary = {
   updated_at: string;
 };
 
-type DocumentContent = DocumentSummary & { content: string };
+type DocumentContent = DocumentSummary & { content: string; reconstructed?: boolean };
 
 const api = "/api";
 const blankDocument = (): DocumentContent => ({
@@ -62,7 +62,11 @@ export default function Home() {
       const opened: DocumentContent = await response.json();
       setDocument({ ...opened, updated_at: summary.updated_at });
       setSavedId(summary.id);
-      setMessage("");
+      setMessage(
+        opened.reconstructed
+          ? "Borrador reconstruido desde chunks antiguos. Revísalo y guarda para migrarlo al editor."
+          : "",
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "No se pudo abrir el documento.");
     } finally {

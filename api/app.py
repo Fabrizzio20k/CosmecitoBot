@@ -140,12 +140,13 @@ async def update_document(
 
 
 @app.get("/documents/{document_id}", dependencies=[Depends(require_admin)])
-async def get_document(document_id: str) -> dict[str, str]:
+async def get_document(document_id: str) -> dict[str, object]:
     normalized_id = _normalize_document_id(document_id)
     if not await qdrant.collection_exists(settings.qdrant_collection):
         raise HTTPException(status_code=404, detail="Documento no encontrado")
     offset: str | int | None = None
     fallback_payload: dict[object, object] | None = None
+    legacy_payloads: list[dict[object, object]] = []
     while True:
         points, offset = await qdrant.scroll(
             collection_name=settings.qdrant_collection,
@@ -165,15 +166,20 @@ async def get_document(document_id: str) -> dict[str, str]:
                     "source": _payload_text(payload, "source", normalized_id),
                     "title": _payload_text(payload, "title", normalized_id),
                     "content": content,
+                    "reconstructed": False,
                 }
+            legacy_payloads.append(payload)
         if offset is None:
             break
     if fallback_payload is None:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
-    raise HTTPException(
-        status_code=409,
-        detail="Este documento fue indexado antes del editor. Reemplázalo para poder editarlo aquí.",
-    )
+    return {
+        "id": normalized_id,
+        "source": _payload_text(fallback_payload, "source", normalized_id),
+        "title": _payload_text(fallback_payload, "title", normalized_id),
+        "content": _reconstruct_legacy_document(legacy_payloads, fallback_payload),
+        "reconstructed": True,
+    }
 
 
 @app.delete("/documents/{document_id}", dependencies=[Depends(require_admin)])
@@ -366,3 +372,26 @@ def _first_heading(text: str) -> str:
 def _payload_text(payload: dict[object, object], key: str, default: str) -> str:
     value = payload.get(key)
     return value.strip() if isinstance(value, str) and value.strip() else default
+
+
+def _reconstruct_legacy_document(
+    payloads: list[dict[object, object]],
+    fallback_payload: dict[object, object],
+) -> str:
+    """Construye un borrador editable para documentos indexados antes del editor."""
+    title = _payload_text(fallback_payload, "title", "Documento sin título")
+    sections: list[str] = [f"# {title}"]
+    seen: set[tuple[str, str]] = set()
+    for payload in payloads:
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        section = _payload_text(payload, "section", title)
+        prefix = f"{title}\n{section}\n\n"
+        body = content.removeprefix(prefix).strip()
+        key = (section, body)
+        if not body or key in seen:
+            continue
+        seen.add(key)
+        sections.extend((f"## {section}", body))
+    return "\n\n".join(sections)
