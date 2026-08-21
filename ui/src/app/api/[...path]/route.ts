@@ -1,11 +1,16 @@
 import type { NextRequest } from "next/server";
 
+import { hasValidSession, SESSION_COOKIE } from "@/server-auth";
+
 export const dynamic = "force-dynamic";
 
 const apiBaseUrl = process.env.API_INTERNAL_URL ?? "http://api:8000";
 const adminToken = process.env.API_ADMIN_TOKEN;
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  if (!hasValidSession(request.cookies.get(SESSION_COOKIE)?.value)) {
+    return Response.json({ detail: "No autenticado." }, { status: 401 });
+  }
   if (!adminToken) {
     return Response.json({ detail: "Falta configurar API_ADMIN_TOKEN en la UI." }, { status: 500 });
   }

@@ -132,6 +132,12 @@ navegador: su proxy de servidor lo añade al hablar con FastAPI. Para generar
 uno, puedes usar un gestor de contraseñas o un valor aleatorio de al menos 32
 caracteres.
 
+La UI requiere iniciar sesión en `/login`. Configura `ADMIN_USERNAME` y
+`ADMIN_PASSWORD` únicamente en el secreto de Jenkins (o en `ui/.env.local`
+durante desarrollo). La contraseña no se expone al navegador ni se guarda en
+el repositorio: el servidor compara valores hasheados y entrega una cookie de
+sesión firmada, HTTP-only y con duración de 12 horas.
+
 El bot muestra en la terminal tiempos de embeddings, búsqueda, generación y
 uso de CPU/RAM.
 

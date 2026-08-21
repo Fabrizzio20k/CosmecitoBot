@@ -1,6 +1,7 @@
 "use client";
 
 import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type DocumentSummary = {
   id: string;
@@ -21,6 +22,7 @@ const blankDocument = (): DocumentContent => ({
 });
 
 export default function Home() {
+  const router = useRouter();
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [document, setDocument] = useState<DocumentContent>(blankDocument);
   const [savedId, setSavedId] = useState<string | null>(null);
@@ -151,6 +153,12 @@ export default function Home() {
     }
   }
 
+  async function logout() {
+    await fetch("/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  }
+
   return (
     <main className="workspace" onKeyDown={handleKeyboardShortcut}>
       <aside className="sidebar">
@@ -182,6 +190,7 @@ export default function Home() {
         <header className="topbar">
           <div><span className="status-dot" />{savedId ? "Documento indexado" : "Borrador"}</div>
           <div className="topbar-actions">
+            <button type="button" className="logout-button" onClick={() => void logout()}>Salir</button>
             {savedId && <button type="button" className="delete-button" onClick={() => void deleteDocument()} disabled={busy}>Eliminar</button>}
             <button type="button" className="save-button" onClick={() => void saveDocument()} disabled={busy}>{busy ? "Guardando…" : "Guardar cambios"}</button>
           </div>
