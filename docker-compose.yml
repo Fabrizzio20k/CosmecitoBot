@@ -117,7 +117,5 @@ volumes:
   qdrant-storage:
 
 networks:
-  default:
-    internal: true
   proxy_net:
     external: true

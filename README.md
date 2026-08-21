@@ -45,9 +45,10 @@ docker compose down
 ```
 
 La UI no publica puertos al host. Se conecta a la red Docker externa
-`proxy_net` para que Caddy la exponga; el resto de servicios permanece en la
-red interna privada de Compose. La UI usa un proxy interno hacia la API y la
-API es la única que escribe en Qdrant.
+`proxy_net` para que Caddy la exponga; el resto de servicios solo está en la
+red privada predeterminada de Compose, con salida a Internet para Discord y
+los servicios de modelos. La UI usa un proxy interno hacia la API y la API es
+la única que escribe en Qdrant.
 
 En macOS, Docker ejecuta llama.cpp en una máquina Linux y no aprovecha Metal;
 para usar aceleración Metal conviene ejecutar los dos servidores de llama.cpp
