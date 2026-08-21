@@ -173,6 +173,7 @@ celerybeat.pid
 
 # Environments
 .env
+*.env.local
 .venv
 models/*.gguf
 data/*.sqlite3

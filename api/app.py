@@ -1,4 +1,3 @@
-import hashlib
 import os
 import re
 import secrets
@@ -6,7 +5,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, Form, Header, HTTPException, status
 from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient, models
 
@@ -47,6 +47,7 @@ def get_settings() -> Settings:
     )
 
 
+load_dotenv()
 settings = get_settings()
 qdrant = AsyncQdrantClient(url=settings.qdrant_url, timeout=600)
 embeddings_client = AsyncOpenAI(
@@ -60,6 +61,7 @@ app = FastAPI(title="Cosmecito knowledge API", version="1.0.0")
 @dataclass(frozen=True)
 class Chunk:
     id: str
+    position: int
     section: str
     content: str
 
@@ -119,20 +121,59 @@ async def list_documents() -> list[dict[str, object]]:
 
 @app.post("/documents", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def create_document(
-    file: UploadFile = File(...),
+    content: str = Form(...),
     document_id: str | None = Form(default=None),
     title: str | None = Form(default=None),
+    source: str | None = Form(default=None),
 ) -> dict[str, object]:
-    return await _ingest(file, document_id, title)
+    return await _ingest(content, document_id, title, source)
 
 
 @app.put("/documents/{document_id}", dependencies=[Depends(require_admin)])
 async def update_document(
     document_id: str,
-    file: UploadFile = File(...),
+    content: str = Form(...),
     title: str | None = Form(default=None),
+    source: str | None = Form(default=None),
 ) -> dict[str, object]:
-    return await _ingest(file, document_id, title)
+    return await _ingest(content, document_id, title, source)
+
+
+@app.get("/documents/{document_id}", dependencies=[Depends(require_admin)])
+async def get_document(document_id: str) -> dict[str, str]:
+    normalized_id = _normalize_document_id(document_id)
+    if not await qdrant.collection_exists(settings.qdrant_collection):
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    offset: str | int | None = None
+    fallback_payload: dict[object, object] | None = None
+    while True:
+        points, offset = await qdrant.scroll(
+            collection_name=settings.qdrant_collection,
+            scroll_filter=_document_filter(normalized_id),
+            limit=128,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points:
+            payload = point.payload or {}
+            fallback_payload = payload
+            content = payload.get("document_content")
+            if isinstance(content, str):
+                return {
+                    "id": normalized_id,
+                    "source": _payload_text(payload, "source", normalized_id),
+                    "title": _payload_text(payload, "title", normalized_id),
+                    "content": content,
+                }
+        if offset is None:
+            break
+    if fallback_payload is None:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    raise HTTPException(
+        status_code=409,
+        detail="Este documento fue indexado antes del editor. Reemplázalo para poder editarlo aquí.",
+    )
 
 
 @app.delete("/documents/{document_id}", dependencies=[Depends(require_admin)])
@@ -147,23 +188,20 @@ async def delete_document(document_id: str) -> dict[str, str]:
     return {"id": normalized_id, "status": "deleted"}
 
 
-async def _ingest(file: UploadFile, document_id: str | None, title: str | None) -> dict[str, object]:
-    filename = file.filename or "documento.md"
-    if not filename.lower().endswith((".md", ".markdown", ".txt")):
-        raise HTTPException(status_code=422, detail="Solo se aceptan archivos .md, .markdown o .txt")
-
-    raw_content = await file.read()
-    if not raw_content:
+async def _ingest(
+    text: str,
+    document_id: str | None,
+    title: str | None,
+    source: str | None,
+) -> dict[str, object]:
+    if not text.strip():
         raise HTTPException(status_code=422, detail="El documento está vacío")
-    if len(raw_content) > settings.max_document_bytes:
+    if len(text.encode("utf-8")) > settings.max_document_bytes:
         raise HTTPException(status_code=413, detail="El documento supera el tamaño máximo permitido")
-    try:
-        text = raw_content.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise HTTPException(status_code=422, detail="El archivo debe usar codificación UTF-8") from error
 
-    normalized_id = _normalize_document_id(document_id or filename)
-    document_title = (title or _first_heading(text) or filename.rsplit(".", 1)[0]).strip()
+    document_source = (source or document_id or title or "documento").strip()
+    normalized_id = _normalize_document_id(document_id or document_source)
+    document_title = (title or _first_heading(text) or document_source).strip()
     chunks = _chunks_from_text(normalized_id, document_title, text)
     if not chunks:
         raise HTTPException(status_code=422, detail="No se encontró texto indexable en el documento")
@@ -185,10 +223,11 @@ async def _ingest(file: UploadFile, document_id: str | None, title: str | None) 
                 vector={settings.qdrant_vector_name: vector},
                 payload={
                     "document_id": normalized_id,
-                    "source": filename,
+                    "source": document_source,
                     "title": document_title,
                     "section": chunk.section,
                     "content": chunk.content,
+                    "document_content": text if chunk.position == 0 else None,
                     "updated_at": updated_at,
                 },
             )
@@ -244,7 +283,14 @@ def _chunks_from_text(document_id: str, title: str, text: str) -> list[Chunk]:
         for position, piece in enumerate(_split_text(section_text)):
             content = f"{title}\n{section}\n\n{piece}".strip()
             chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{document_id}:{section}:{position}"))
-            chunks.append(Chunk(id=chunk_id, section=section, content=content))
+            chunks.append(
+                Chunk(
+                    id=chunk_id,
+                    position=len(chunks),
+                    section=section,
+                    content=content,
+                )
+            )
     return chunks
 
 

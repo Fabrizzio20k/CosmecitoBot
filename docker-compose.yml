@@ -80,6 +80,7 @@ services:
       dockerfile: Dockerfile
     environment:
       API_INTERNAL_URL: http://api:8000
+      API_ADMIN_TOKEN: ${API_ADMIN_TOKEN}
     networks:
       - default
       - proxy_net

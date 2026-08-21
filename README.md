@@ -50,6 +50,17 @@ red privada predeterminada de Compose, con salida a Internet para Discord y
 los servicios de modelos. La UI usa un proxy interno hacia la API y la API es
 la única que escribe en Qdrant.
 
+## Entornos locales
+
+Cada servicio tiene su propia plantilla de variables, sin secretos reales:
+
+- `bot/.env.example` → copia a `bot/.env` para ejecutar el bot de forma nativa.
+- `api/.env.example` → copia a `api/.env` para ejecutar FastAPI de forma nativa.
+- `ui/.env.example` → copia a `ui/.env.local` para ejecutar Next.js de forma nativa.
+
+El `.env.example` de la raíz es la plantilla de Docker Compose y del credential
+de Jenkins. Los archivos `.env` y `.env.local` reales no se versionan.
+
 En macOS, Docker ejecuta llama.cpp en una máquina Linux y no aprovecha Metal;
 para usar aceleración Metal conviene ejecutar los dos servidores de llama.cpp
 de forma nativa. Consulta consumo y estado de contenedores con:
@@ -92,9 +103,10 @@ descartan.
 ## Conocimiento del curso (RAG)
 
 El bot consulta una colección de Qdrant ya indexada; no lee ni indexa archivos
-al iniciar. La UI permite subir archivos `.md`, `.markdown` y `.txt`,
-reemplazarlos o eliminarlos. La API los fragmenta, genera embeddings y los
-guarda en Qdrant; estarán disponibles para el bot al terminar la carga.
+al iniciar. La UI incluye una biblioteca y un editor Markdown: puedes crear
+documentos, importar `.md`, `.markdown` y `.txt` al editor, editarlos,
+guardarlos o eliminarlos. La API fragmenta el texto, genera embeddings y lo
+guarda en Qdrant; estará disponible para el bot al terminar el guardado.
 
 Qdrant debe tener la colección definida por `QDRANT_COLLECTION` y un vector
 nombrado `QDRANT_VECTOR_NAME` (por defecto, `embedding`). Cada punto debe
@@ -113,13 +125,12 @@ RAG_TOP_K=4
 RAG_MIN_SCORE=0.45
 QDRANT_COLLECTION=course_knowledge
 API_ADMIN_TOKEN=un_secreto_largo
-UI_PORT=3000
 ```
 
-`API_ADMIN_TOKEN` es obligatorio para la API. La UI lo solicita al usuario y
-lo reenvía en cada operación; no se incluye en el bundle ni se guarda en el
-navegador. Para generar uno, puedes usar un gestor de contraseñas o un valor
-aleatorio de al menos 32 caracteres.
+`API_ADMIN_TOKEN` es obligatorio para la API. La UI no lo conoce en el
+navegador: su proxy de servidor lo añade al hablar con FastAPI. Para generar
+uno, puedes usar un gestor de contraseñas o un valor aleatorio de al menos 32
+caracteres.
 
 El bot muestra en la terminal tiempos de embeddings, búsqueda, generación y
 uso de CPU/RAM.
