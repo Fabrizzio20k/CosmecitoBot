@@ -18,7 +18,9 @@ pipeline {
                         set -euo pipefail
 
                         set -a
-                        source "$BOT_ENV_FILE"
+                        # El credential puede haberse creado en Windows (CRLF). Bash
+                        # conserva el \r dentro del valor al usar source directamente.
+                        source <(sed 's/\r$//' "$BOT_ENV_FILE")
                         set +a
                         export COMPOSE_PROJECT_NAME='cosmecitobot'
 
