@@ -1,14 +1,24 @@
 import os
 import re
 import secrets
+import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, status
 from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
+from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
+
+from cosmecito_db import Database
+from cosmecito_db.models import Announcement, AnnouncementChannel, Reminder, ReminderRecipient
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,7 @@ class Settings:
     chunk_size: int
     chunk_overlap: int
     max_document_bytes: int
+    database_url: str
 
 
 def get_settings() -> Settings:
@@ -44,6 +55,10 @@ def get_settings() -> Settings:
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         max_document_bytes=int(os.getenv("API_DOCUMENT_MAX_BYTES", "5000000")),
+        database_url=os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://cosmecito:cosmecito@127.0.0.1:5432/cosmecito",
+        ),
     )
 
 
@@ -55,6 +70,7 @@ embeddings_client = AsyncOpenAI(
     api_key="local-llama-cpp",
     timeout=600,
 )
+database = Database(settings.database_url)
 app = FastAPI(title="Cosmecito knowledge API", version="1.0.0")
 
 
@@ -76,15 +92,205 @@ async def require_admin(
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await qdrant.close()
+    await database.close()
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     try:
         await qdrant.get_collections()
+        await database.ping()
     except Exception as error:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Qdrant no disponible") from error
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Qdrant o PostgreSQL no disponible") from error
     return {"status": "ok"}
+
+
+class AnnouncementInput(BaseModel):
+    content: str = Field(min_length=1, max_length=2_000)
+    channel_ids: list[int] = Field(min_length=1, max_length=25)
+    scheduled_for: datetime | None = None
+    created_by: int | None = None
+
+
+class ReminderInput(BaseModel):
+    content: str = Field(min_length=1, max_length=2_000)
+    scheduled_for: datetime
+    user_ids: list[int] = Field(default_factory=list, max_length=500)
+    role_id: int | None = None
+
+
+def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datetime:
+    if value is None:
+        if default_now:
+            return datetime.now(UTC)
+        raise HTTPException(status_code=422, detail="La fecha programada es obligatoria")
+    if value.tzinfo is None:
+        raise HTTPException(status_code=422, detail="La fecha debe incluir zona horaria; usa UTC (Z)")
+    return value.astimezone(UTC)
+
+
+def _announcement_payload(announcement: Announcement) -> dict[str, object]:
+    return {
+        "id": str(announcement.id),
+        "content": announcement.content,
+        "created_by": announcement.created_by,
+        "status": announcement.status,
+        "created_at": announcement.created_at.isoformat(),
+        "channels": [
+            {
+                "id": channel.id,
+                "channel_id": channel.channel_id,
+                "scheduled_for": channel.scheduled_for.isoformat(),
+                "status": channel.status,
+                "discord_message_id": channel.discord_message_id,
+                "sent_at": channel.sent_at.isoformat() if channel.sent_at else None,
+                "error": channel.error,
+            }
+            for channel in announcement.channels
+        ],
+        "reminders": [
+            {
+                "id": str(reminder.id),
+                "content": reminder.content,
+                "scheduled_for": reminder.scheduled_for.isoformat(),
+                "target_role_id": reminder.target_role_id,
+                "status": reminder.status,
+                "recipients": [
+                    {
+                        "user_id": recipient.user_id,
+                        "source": recipient.source,
+                        "status": recipient.status,
+                        "sent_at": recipient.sent_at.isoformat() if recipient.sent_at else None,
+                        "error": recipient.error,
+                    }
+                    for recipient in reminder.recipients
+                ],
+            }
+            for reminder in announcement.reminders
+        ],
+    }
+
+
+async def _load_announcement(announcement_id: uuid.UUID) -> Announcement:
+    async with database.session() as session:
+        announcement = await session.scalar(
+            select(Announcement)
+            .where(Announcement.id == announcement_id)
+            .options(
+                selectinload(Announcement.channels),
+                selectinload(Announcement.reminders).selectinload(Reminder.recipients),
+            )
+        )
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="Anuncio no encontrado")
+        return announcement
+
+
+@app.get("/announcements", dependencies=[Depends(require_admin)])
+async def list_announcements() -> list[dict[str, object]]:
+    async with database.session() as session:
+        announcements = list(
+            await session.scalars(
+                select(Announcement)
+                .options(
+                    selectinload(Announcement.channels),
+                    selectinload(Announcement.reminders).selectinload(Reminder.recipients),
+                )
+                .order_by(Announcement.created_at.desc())
+                .limit(100)
+            )
+        )
+        return [_announcement_payload(announcement) for announcement in announcements]
+
+
+@app.post("/announcements", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_announcement(payload: AnnouncementInput) -> dict[str, object]:
+    channel_ids = sorted(set(payload.channel_ids))
+    if any(channel_id <= 0 for channel_id in channel_ids):
+        raise HTTPException(status_code=422, detail="Los IDs de canal deben ser positivos")
+    scheduled_for = _utc_datetime(payload.scheduled_for, default_now=True)
+    async with database.session() as session, session.begin():
+        announcement = Announcement(
+            content=payload.content.strip(),
+            created_by=payload.created_by,
+            status="scheduled",
+            channels=[
+                AnnouncementChannel(channel_id=channel_id, scheduled_for=scheduled_for, status="queued")
+                for channel_id in channel_ids
+            ],
+        )
+        session.add(announcement)
+        await session.flush()
+        announcement_id = announcement.id
+    return _announcement_payload(await _load_announcement(announcement_id))
+
+
+@app.get("/announcements/{announcement_id}", dependencies=[Depends(require_admin)])
+async def get_announcement(announcement_id: uuid.UUID) -> dict[str, object]:
+    return _announcement_payload(await _load_announcement(announcement_id))
+
+
+@app.post("/announcements/{announcement_id}/reminders", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_reminder(announcement_id: uuid.UUID, payload: ReminderInput) -> dict[str, object]:
+    user_ids = sorted(set(payload.user_ids))
+    if not user_ids and payload.role_id is None:
+        raise HTTPException(status_code=422, detail="Indica al menos un usuario o un rol destinatario")
+    if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
+        raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
+    scheduled_for = _utc_datetime(payload.scheduled_for)
+    async with database.session() as session, session.begin():
+        announcement = await session.get(Announcement, announcement_id)
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="Anuncio no encontrado")
+        if announcement.status == "cancelled":
+            raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
+        reminder = Reminder(
+            announcement_id=announcement_id,
+            content=payload.content.strip(),
+            scheduled_for=scheduled_for,
+            target_role_id=payload.role_id,
+            status="scheduled",
+            recipients=[
+                ReminderRecipient(user_id=user_id, source="direct", status="queued")
+                for user_id in user_ids
+            ],
+        )
+        session.add(reminder)
+        await session.flush()
+    return _announcement_payload(await _load_announcement(announcement_id))
+
+
+@app.delete("/announcements/{announcement_id}", dependencies=[Depends(require_admin)])
+async def cancel_announcement(announcement_id: uuid.UUID) -> dict[str, str]:
+    async with database.session() as session, session.begin():
+        announcement = await session.get(Announcement, announcement_id, with_for_update=True)
+        if announcement is None:
+            raise HTTPException(status_code=404, detail="Anuncio no encontrado")
+        announcement.status = "cancelled"
+        await session.execute(
+            update(AnnouncementChannel)
+            .where(
+                AnnouncementChannel.announcement_id == announcement_id,
+                AnnouncementChannel.status.in_(["queued", "processing"]),
+            )
+            .values(status="cancelled")
+        )
+        await session.execute(
+            update(Reminder)
+            .where(Reminder.announcement_id == announcement_id, Reminder.status.in_(["scheduled", "processing"]))
+            .values(status="cancelled")
+        )
+        await session.execute(
+            update(ReminderRecipient)
+            .where(
+                ReminderRecipient.reminder_id.in_(
+                    select(Reminder.id).where(Reminder.announcement_id == announcement_id)
+                ),
+                ReminderRecipient.status.in_(["queued", "processing"]),
+            )
+            .values(status="cancelled")
+        )
+    return {"id": str(announcement_id), "status": "cancelled"}
 
 
 @app.get("/documents", dependencies=[Depends(require_admin)])

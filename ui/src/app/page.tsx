@@ -1,6 +1,7 @@
 "use client";
 
 import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 type DocumentSummary = {
@@ -190,6 +191,7 @@ export default function Home() {
         <header className="topbar">
           <div><span className="status-dot" />{savedId ? "Documento indexado" : "Borrador"}</div>
           <div className="topbar-actions">
+            <Link className="topbar-link" href="/announcements">Anuncios</Link>
             <button type="button" className="logout-button" onClick={() => void logout()}>Salir</button>
             {savedId && <button type="button" className="delete-button" onClick={() => void deleteDocument()} disabled={busy}>Eliminar</button>}
             <button type="button" className="save-button" onClick={() => void saveDocument()} disabled={busy}>{busy ? "Guardando…" : "Guardar cambios"}</button>

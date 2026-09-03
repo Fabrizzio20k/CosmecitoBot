@@ -5,10 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY bot/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
-COPY cosmecito_bot ./cosmecito_bot
+COPY cosmecito_db ./cosmecito_db
+COPY bot/main.py .
+COPY bot/cosmecito_bot ./cosmecito_bot
 
 CMD ["python", "main.py"]

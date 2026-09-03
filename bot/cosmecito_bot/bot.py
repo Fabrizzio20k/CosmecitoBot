@@ -6,24 +6,31 @@ from discord.ext import commands
 from cosmecito_bot.config import Settings
 from cosmecito_bot.services.rag import RagService
 from cosmecito_bot.services.runtime_metrics import RuntimeMetrics
+from cosmecito_db import Database
 
 COGS = (
     "cosmecito_bot.cogs.ping",
     "cosmecito_bot.cogs.meme",
     "cosmecito_bot.cogs.chat",
+    "cosmecito_bot.cogs.announcements",
 )
 
 
 class CosmecitoBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
+        # Necesario para expandir destinatarios de recordatorios por rol.
+        intents.members = True
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.settings = settings
         self.metrics = RuntimeMetrics()
         self.rag = RagService(settings, self.metrics)
+        self.database = Database(settings.database_url)
 
     async def setup_hook(self) -> None:
         print(await self.rag.collection_status())
+        await self.database.ping()
+        print("✅ PostgreSQL conectado")
         print(await asyncio.to_thread(self.metrics.report))
 
         for extension in COGS:
@@ -46,4 +53,5 @@ class CosmecitoBot(commands.Bot):
 
     async def close(self) -> None:
         await self.rag.close()
+        await self.database.close()
         await super().close()

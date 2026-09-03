@@ -33,12 +33,12 @@ docker compose up --build -d
 docker compose logs -f
 ```
 
-Compose levanta el bot, la API de documentos, la UI, Qdrant y los servidores
-internos de chat y embeddings.
-Los modelos, el historial y los vectores se guardan en volúmenes Docker, por lo
-que sobreviven a reinicios. Qdrant no publica puertos al host: solo los
-servicios de esta aplicación pueden acceder a él. Qdrant usa la imagen `latest`
-en cada reconstrucción. Para detenerlos:
+Compose levanta el bot, la API de documentos, la UI, PostgreSQL, Qdrant y los
+servidores internos de chat y embeddings. PostgreSQL y Qdrant no publican
+puertos al host: solo los servicios de esta aplicación pueden acceder a ellos.
+Los modelos, la base de datos y los vectores se guardan en volúmenes Docker,
+por lo que sobreviven a reinicios. Qdrant usa la imagen `latest` en cada
+reconstrucción. Para detenerlos:
 
 ```bash
 docker compose down
@@ -47,8 +47,14 @@ docker compose down
 La UI no publica puertos al host. Se conecta a la red Docker externa
 `proxy_net` para que Caddy la exponga; el resto de servicios solo está en la
 red privada predeterminada de Compose, con salida a Internet para Discord y
-los servicios de modelos. La UI usa un proxy interno hacia la API y la API es
-la única que escribe en Qdrant.
+los servicios de modelos. La UI usa un proxy interno hacia la API; la API es
+la única que escribe en Qdrant y administra los anuncios de PostgreSQL.
+
+Al primer despliegue, el servicio `migrations` aplica las migraciones Alembic e
+importa una sola vez el historial existente de `bot-state/chat_history.sqlite3`
+si el volumen existe. No borres `bot-state` hasta verificar esa importación en
+los logs. Las migraciones posteriores se aplican automáticamente antes de que
+arranquen la API y el bot.
 
 ## Entornos locales
 
@@ -95,10 +101,25 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/meme imagen: texto:` genera un meme. Separa texto superior e inferior con
   `|`.
 - `/ping` comprueba que el bot esté conectado.
+- `/anuncio` registra un anuncio para un canal, inmediato o programado.
+- `/recordatorio` programa un DM para una persona o los miembros de un rol.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
 máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
-descartan.
+descartan. El historial ahora se guarda en PostgreSQL.
+
+Para recordatorios por rol, activa **Server Members Intent** en el portal de
+desarrolladores de Discord; el bot solicita ese intent para expandir el rol al
+momento de enviar el recordatorio. Un usuario con DM cerrados quedará marcado
+como envío fallido en la UI.
+
+## Anuncios y recordatorios
+
+La UI tiene una sección **Anuncios**. Desde ella se crean anuncios globales en
+uno o varios canales mediante IDs de canal y se agregan recordatorios privados
+para varios IDs de usuario, un rol o ambos. Cada entrega conserva estado,
+fecha y error. Los IDs se pueden activar en Discord con el modo desarrollador
+(`Copiar ID`).
 
 ## Conocimiento del curso (RAG)
 

@@ -33,7 +33,7 @@ class ChatCog(commands.Cog):
         )
         # Reserva contexto para la pregunta, la memoria y la respuesta del modelo.
         self.rag_context_char_budget = max(250, self.context_budget // 3)
-        self.history = ChatHistory(settings.chat_database_path)
+        self.history = ChatHistory(bot.database.sessions)
         self.rag: RagService = bot.rag
         self.metrics = bot.metrics
         self.locks: defaultdict[tuple[int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -83,7 +83,7 @@ class ChatCog(commands.Cog):
                     self.rag_context_char_budget,
                 )
                 rag_context = self.rag.format_context(sources)
-                conversation = self.history.get_conversation(user_id, channel_id)
+                conversation = await self.history.get_conversation(user_id, channel_id)
                 trimming_started_at = time.perf_counter()
                 conversation = await self._compact_history(
                     user_id,
@@ -111,8 +111,8 @@ class ChatCog(commands.Cog):
                     time.perf_counter() - generation_started_at,
                 )
                 response = completion.choices[0].message.content or "El modelo no devolvió texto."
-                self.history.add_message(user_id, channel_id, "user", mensaje)
-                self.history.add_message(user_id, channel_id, "assistant", response)
+                await self.history.add_message(user_id, channel_id, "user", mensaje)
+                await self.history.add_message(user_id, channel_id, "assistant", response)
         except APITimeoutError:
             await interaction.edit_original_response(
                 content="El modelo tardó demasiado en responder.",
@@ -151,8 +151,8 @@ class ChatCog(commands.Cog):
         # de persistirlas; asi la base nunca supera el limite configurado.
         # No se genera resumen: los mensajes mas antiguos se descartan.
         if conversation.summary:
-            self.history.clear_summary(user_id, channel_id)
-            conversation = self.history.get_conversation(user_id, channel_id)
+            await self.history.clear_summary(user_id, channel_id)
+            conversation = await self.history.get_conversation(user_id, channel_id)
 
         target_message_count = max(0, self.max_recent_messages - 2)
         while (
@@ -169,12 +169,12 @@ class ChatCog(commands.Cog):
 
             excess_messages = max(1, len(conversation.messages) - target_message_count)
             messages_to_discard = conversation.messages[:excess_messages]
-            self.history.discard_messages(
+            await self.history.discard_messages(
                 user_id,
                 channel_id,
                 [message.id for message in messages_to_discard],
             )
-            conversation = self.history.get_conversation(user_id, channel_id)
+            conversation = await self.history.get_conversation(user_id, channel_id)
 
         return conversation
 

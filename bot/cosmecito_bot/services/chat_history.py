@@ -1,6 +1,10 @@
-import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from cosmecito_db.models import ChatMessage as ChatMessageModel
+from cosmecito_db.models import Conversation as ConversationModel
 
 
 @dataclass(frozen=True)
@@ -17,114 +21,73 @@ class Conversation:
 
 
 class ChatHistory:
-    def __init__(self, database_path: Path) -> None:
-        self.database_path = database_path
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._create_tables()
+    """Historial de chat almacenado en PostgreSQL."""
 
-    def get_conversation(self, user_id: int, channel_id: int) -> Conversation:
-        with self._connect() as connection:
-            summary_row = connection.execute(
-                """
-                SELECT summary
-                FROM conversations
-                WHERE user_id = ? AND channel_id = ?
-                """,
-                (user_id, channel_id),
-            ).fetchone()
-            message_rows = connection.execute(
-                """
-                SELECT id, role, content
-                FROM messages
-                WHERE user_id = ? AND channel_id = ?
-                ORDER BY id
-                """,
-                (user_id, channel_id),
-            ).fetchall()
+    def __init__(self, sessions: async_sessionmaker) -> None:
+        self.sessions = sessions
+
+    async def get_conversation(self, user_id: int, channel_id: int) -> Conversation:
+        async with self.sessions() as session:
+            summary = await session.scalar(
+                select(ConversationModel.summary).where(
+                    ConversationModel.user_id == user_id,
+                    ConversationModel.channel_id == channel_id,
+                )
+            )
+            rows = await session.scalars(
+                select(ChatMessageModel)
+                .where(
+                    ChatMessageModel.user_id == user_id,
+                    ChatMessageModel.channel_id == channel_id,
+                )
+                .order_by(ChatMessageModel.id)
+            )
+            messages = rows.all()
 
         return Conversation(
-            summary=summary_row["summary"] if summary_row else "",
-            messages=[
-                ChatMessage(
-                    id=row["id"],
-                    role=row["role"],
-                    content=row["content"],
-                )
-                for row in message_rows
-            ],
+            summary=summary or "",
+            messages=[ChatMessage(id=row.id, role=row.role, content=row.content) for row in messages],
         )
 
-    def add_message(self, user_id: int, channel_id: int, role: str, content: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO messages (user_id, channel_id, role, content)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, channel_id, role, content),
+    async def add_message(self, user_id: int, channel_id: int, role: str, content: str) -> None:
+        async with self.sessions() as session, session.begin():
+            session.add(
+                ChatMessageModel(
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    role=role,
+                    content=content,
+                )
             )
 
-    def discard_messages(
+    async def discard_messages(
         self,
         user_id: int,
         channel_id: int,
         message_ids: list[int],
     ) -> None:
         """Elimina mensajes concretos y cualquier resumen heredado del chat."""
-        with self._connect() as connection:
+        async with self.sessions() as session, session.begin():
             if message_ids:
-                placeholders = ", ".join("?" for _ in message_ids)
-                connection.execute(
-                    f"""
-                    DELETE FROM messages
-                    WHERE user_id = ? AND channel_id = ? AND id IN ({placeholders})
-                    """,
-                    [user_id, channel_id, *message_ids],
+                await session.execute(
+                    delete(ChatMessageModel).where(
+                        ChatMessageModel.user_id == user_id,
+                        ChatMessageModel.channel_id == channel_id,
+                        ChatMessageModel.id.in_(message_ids),
+                    )
                 )
-            connection.execute(
-                """
-                DELETE FROM conversations
-                WHERE user_id = ? AND channel_id = ?
-                """,
-                (user_id, channel_id),
+            await session.execute(
+                delete(ConversationModel).where(
+                    ConversationModel.user_id == user_id,
+                    ConversationModel.channel_id == channel_id,
+                )
             )
 
-    def clear_summary(self, user_id: int, channel_id: int) -> None:
-        """Quita la memoria resumida usada por versiones anteriores del bot."""
-        with self._connect() as connection:
-            connection.execute(
-                """
-                DELETE FROM conversations
-                WHERE user_id = ? AND channel_id = ?
-                """,
-                (user_id, channel_id),
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _create_tables(self) -> None:
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS conversations (
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    summary TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY (user_id, channel_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-                    content TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_messages_conversation
-                ON messages (user_id, channel_id, id);
-                """,
+    async def clear_summary(self, user_id: int, channel_id: int) -> None:
+        async with self.sessions() as session, session.begin():
+            await session.execute(
+                delete(ConversationModel).where(
+                    ConversationModel.user_id == user_id,
+                    ConversationModel.channel_id == channel_id,
+                )
             )

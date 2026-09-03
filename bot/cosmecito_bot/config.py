@@ -1,7 +1,6 @@
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -18,7 +17,7 @@ class Settings:
     llama_cpp_timeout_seconds: float
     llama_cpp_context_tokens: int
     llama_cpp_max_response_tokens: int
-    chat_database_path: Path
+    database_url: str
     chat_rate_limit_seconds: float
     chat_max_recent_messages: int
     rag_embedding_base_url: str
@@ -111,8 +110,9 @@ def get_settings() -> Settings:
             "LLAMA_CPP_MAX_RESPONSE_TOKENS",
             default=256,
         ),
-        chat_database_path=Path(
-            os.getenv("CHAT_DATABASE_PATH", "data/chat_history.sqlite3"),
+        database_url=os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://cosmecito:cosmecito@127.0.0.1:5432/cosmecito",
         ),
         chat_rate_limit_seconds=_get_positive_float_env(
             "CHAT_RATE_LIMIT_SECONDS",
