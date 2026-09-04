@@ -20,6 +20,7 @@ type Recipient = {
 
 type Reminder = {
   id: string;
+  announcement_id: string | null;
   content: string;
   scheduled_for: string;
   target_role_id: number | null;
@@ -46,15 +47,17 @@ function parseIds(value: string) {
   return ids;
 }
 
-function localTimeToIso(value: string) {
+function limaTimeToIso(value: string) {
   if (!value) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) throw new Error("La fecha programada no es válida.");
-  return date.toISOString();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
+    throw new Error("La fecha programada no es válida.");
+  }
+  return `${value}:00-05:00`;
 }
 
 export default function AnnouncementsPage() {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [standaloneReminders, setStandaloneReminders] = useState<Reminder[]>([]);
   const [content, setContent] = useState("");
   const [channels, setChannels] = useState("");
   const [scheduledFor, setScheduledFor] = useState("");
@@ -88,11 +91,15 @@ export default function AnnouncementsPage() {
   async function loadAnnouncements() {
     try {
       setBusy(true);
-      const response = await request("/announcements");
-      const loaded = await response.json() as Announcement[];
+      const [announcementsResponse, remindersResponse] = await Promise.all([
+        request("/announcements"),
+        request("/reminders"),
+      ]);
+      const loaded = await announcementsResponse.json() as Announcement[];
+      const loadedReminders = await remindersResponse.json() as Reminder[];
       setAnnouncements(loaded);
-      setReminderFor((current) => current || loaded[0]?.id || "");
-      setMessage(loaded.length ? "" : "Aún no hay anuncios.");
+      setStandaloneReminders(loadedReminders);
+      setMessage(loaded.length || loadedReminders.length ? "" : "Aún no hay anuncios ni recordatorios.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "No se pudieron cargar los anuncios.");
     } finally {
@@ -106,7 +113,7 @@ export default function AnnouncementsPage() {
       setBusy(true);
       await request("/announcements", {
         method: "POST",
-        body: JSON.stringify({ content: content.trim(), channel_ids: parseIds(channels), scheduled_for: localTimeToIso(scheduledFor) }),
+        body: JSON.stringify({ content: content.trim(), channel_ids: parseIds(channels), scheduled_for: limaTimeToIso(scheduledFor) }),
       });
       setContent(""); setChannels(""); setScheduledFor("");
       setMessage("Anuncio guardado y en cola de publicación.");
@@ -121,20 +128,20 @@ export default function AnnouncementsPage() {
   async function createReminder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
-      if (!reminderFor) throw new Error("Selecciona el anuncio que se recordará.");
       if (!reminderDate) throw new Error("Indica la fecha y hora del recordatorio.");
       const userIds = users.trim() ? parseIds(users) : [];
       const roleId = role.trim() ? Number(role.trim()) : undefined;
       if (!userIds.length && !roleId) throw new Error("Indica usuarios, un rol, o ambos.");
       if (roleId !== undefined && (!Number.isSafeInteger(roleId) || roleId <= 0)) throw new Error("El ID de rol no es válido.");
       setBusy(true);
-      await request(`/announcements/${reminderFor}/reminders`, {
+      await request("/reminders", {
         method: "POST",
         body: JSON.stringify({
           content: reminderContent.trim(),
-          scheduled_for: localTimeToIso(reminderDate),
+          scheduled_for: limaTimeToIso(reminderDate),
           user_ids: userIds,
           role_id: roleId,
+          announcement_id: reminderFor || undefined,
         }),
       });
       setReminderContent(""); setReminderDate(""); setUsers(""); setRole("");
@@ -161,6 +168,20 @@ export default function AnnouncementsPage() {
     }
   }
 
+  async function cancelReminder(id: string) {
+    if (!window.confirm("¿Cancelar este recordatorio pendiente?")) return;
+    try {
+      setBusy(true);
+      await request(`/reminders/${id}`, { method: "DELETE" });
+      setMessage("Recordatorio cancelado.");
+      await loadAnnouncements();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "No se pudo cancelar el recordatorio.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <main className="announcement-page">
       <header className="announcement-header">
@@ -173,15 +194,15 @@ export default function AnnouncementsPage() {
           <h2>Nuevo anuncio global</h2>
           <label>Mensaje<textarea value={content} onChange={(event) => setContent(event.target.value)} maxLength={2000} required /></label>
           <label>IDs de canales, separados por coma<input value={channels} onChange={(event) => setChannels(event.target.value)} placeholder="123..., 456..." required /></label>
-          <label>Publicar en fecha/hora (opcional)<input type="datetime-local" value={scheduledFor} onChange={(event) => setScheduledFor(event.target.value)} /></label>
+          <label>Publicar en fecha/hora Lima (opcional)<input type="datetime-local" value={scheduledFor} onChange={(event) => setScheduledFor(event.target.value)} /></label>
           <button className="save-button" type="submit" disabled={busy}>Guardar anuncio</button>
         </form>
 
         <form className="announcement-card" onSubmit={(event) => void createReminder(event)}>
           <h2>Nuevo recordatorio privado</h2>
-          <label>Anuncio<select value={reminderFor} onChange={(event) => setReminderFor(event.target.value)} required><option value="">Selecciona un anuncio</option>{announcements.filter((item) => item.status !== "cancelled").map((item) => <option key={item.id} value={item.id}>{item.content.slice(0, 70)} · {item.id.slice(0, 8)}</option>)}</select></label>
+          <label>Anuncio relacionado (opcional)<select value={reminderFor} onChange={(event) => setReminderFor(event.target.value)}><option value="">Sin anuncio asociado</option>{announcements.filter((item) => item.status !== "cancelled").map((item) => <option key={item.id} value={item.id}>{item.content.slice(0, 70)} · {item.id.slice(0, 8)}</option>)}</select></label>
           <label>Mensaje<textarea value={reminderContent} onChange={(event) => setReminderContent(event.target.value)} maxLength={2000} required /></label>
-          <label>Enviar en fecha/hora<input type="datetime-local" value={reminderDate} onChange={(event) => setReminderDate(event.target.value)} required /></label>
+          <label>Enviar en fecha/hora Lima<input type="datetime-local" value={reminderDate} onChange={(event) => setReminderDate(event.target.value)} required /></label>
           <label>IDs de usuarios (opcional, separados por coma)<input value={users} onChange={(event) => setUsers(event.target.value)} placeholder="123..., 456..." /></label>
           <label>ID de rol (opcional)<input value={role} onChange={(event) => setRole(event.target.value)} placeholder="123..." /></label>
           <button className="save-button" type="submit" disabled={busy}>Programar recordatorio</button>
@@ -190,12 +211,13 @@ export default function AnnouncementsPage() {
 
       {message && <p className="announcement-message">{message}</p>}
       <section className="announcement-list" aria-label="Anuncios registrados">
+        {standaloneReminders.length > 0 && <article className="announcement-item"><h2>Recordatorios independientes</h2>{standaloneReminders.map((reminder) => <div className="reminder" key={reminder.id}><div className="announcement-item-head"><strong>{reminder.status} · {new Date(reminder.scheduled_for).toLocaleString("es-PE", { timeZone: "America/Lima" })} (Lima)</strong>{reminder.status === "scheduled" && <button className="delete-button" type="button" disabled={busy} onClick={() => void cancelReminder(reminder.id)}>Cancelar</button>}</div><p>{reminder.content}</p><small>{reminder.target_role_id ? `Rol ${reminder.target_role_id}` : ""} {reminder.recipients.map((recipient) => ` · ${recipient.user_id}: ${recipient.status}`).join("")}</small></div>)}</article>}
         {announcements.map((announcement) => (
           <article className="announcement-item" key={announcement.id}>
             <div className="announcement-item-head"><div><span className={`status status-${announcement.status}`}>{announcement.status}</span><time>{new Date(announcement.created_at).toLocaleString()}</time></div>{announcement.status !== "cancelled" && <button className="delete-button" type="button" disabled={busy} onClick={() => void cancelAnnouncement(announcement.id)}>Cancelar</button>}</div>
             <p>{announcement.content}</p><code>{announcement.id}</code>
-            <h3>Canales</h3><ul>{announcement.channels.map((channel) => <li key={channel.channel_id}>#{channel.channel_id} · {channel.status} · {new Date(channel.scheduled_for).toLocaleString()}{channel.error ? ` · ${channel.error}` : ""}</li>)}</ul>
-            {announcement.reminders.length > 0 && <><h3>Recordatorios</h3>{announcement.reminders.map((reminder) => <div className="reminder" key={reminder.id}><strong>{reminder.status} · {new Date(reminder.scheduled_for).toLocaleString()}</strong><p>{reminder.content}</p><small>{reminder.target_role_id ? `Rol ${reminder.target_role_id}` : ""} {reminder.recipients.map((recipient) => ` · ${recipient.user_id}: ${recipient.status}`).join("")}</small></div>)}</>}
+            <h3>Canales</h3><ul>{announcement.channels.map((channel) => <li key={channel.channel_id}>#{channel.channel_id} · {channel.status} · {new Date(channel.scheduled_for).toLocaleString("es-PE", { timeZone: "America/Lima" })} (Lima){channel.error ? ` · ${channel.error}` : ""}</li>)}</ul>
+            {announcement.reminders.length > 0 && <><h3>Recordatorios</h3>{announcement.reminders.map((reminder) => <div className="reminder" key={reminder.id}><strong>{reminder.status} · {new Date(reminder.scheduled_for).toLocaleString("es-PE", { timeZone: "America/Lima" })} (Lima)</strong><p>{reminder.content}</p><small>{reminder.target_role_id ? `Rol ${reminder.target_role_id}` : ""} {reminder.recipients.map((recipient) => ` · ${recipient.user_id}: ${recipient.status}`).join("")}</small></div>)}</>}
           </article>
         ))}
       </section>

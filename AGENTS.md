@@ -135,8 +135,8 @@ empaquetar antes ese módulo.
    opcional; la API registra un anuncio y uno o más `announcement_channels`.
 2. El bot consulta cada 20 segundos entregas pendientes, las reclama con
    `FOR UPDATE SKIP LOCKED`, publica en Discord y registra `sent` o `failed`.
-3. La UI o `/recordatorio` crea un `Reminder` con uno o varios usuarios y/o un
-   ID de rol.
+3. La UI o `/recordatorio` crea un `Reminder` independiente con uno o varios
+   usuarios y/o un ID de rol; el anuncio relacionado es opcional.
 4. Al vencer la fecha, el bot materializa miembros del rol, manda DM a cada
    destinatario y conserva estado, intento, fecha y error individual.
 
@@ -153,6 +153,8 @@ Rutas administrativas relevantes:
 | `POST` | `/announcements` | Crea/publica o programa un anuncio de canal. |
 | `GET` | `/announcements/{id}` | Devuelve un anuncio concreto. |
 | `POST` | `/announcements/{id}/reminders` | Programa DM para IDs de usuario y/o rol. |
+| `GET` / `POST` | `/reminders` | Lista o crea recordatorios independientes. |
+| `DELETE` | `/reminders/{id}` | Cancela un recordatorio pendiente. |
 | `DELETE` | `/announcements/{id}` | Cancela entregas y recordatorios aún pendientes. |
 
 Los comandos Discord exigen `Manage Guild`. Para los destinatarios por rol,

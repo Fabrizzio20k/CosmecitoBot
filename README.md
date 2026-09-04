@@ -101,8 +101,9 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/meme imagen: texto:` genera un meme. Separa texto superior e inferior con
   `|`.
 - `/ping` comprueba que el bot esté conectado.
-- `/anuncio` registra un anuncio para un canal, inmediato o programado.
-- `/recordatorio` programa un DM para una persona o los miembros de un rol.
+- `/anuncio` registra un anuncio para un canal, inmediato o programado en hora Lima.
+- `/recordatorio` programa un DM independiente para una persona o los miembros
+  de un rol; puede enlazarse opcionalmente a un anuncio.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
 máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
@@ -116,10 +117,11 @@ como envío fallido en la UI.
 ## Anuncios y recordatorios
 
 La UI tiene una sección **Anuncios**. Desde ella se crean anuncios globales en
-uno o varios canales mediante IDs de canal y se agregan recordatorios privados
-para varios IDs de usuario, un rol o ambos. Cada entrega conserva estado,
-fecha y error. Los IDs se pueden activar en Discord con el modo desarrollador
-(`Copiar ID`).
+uno o varios canales mediante IDs de canal y recordatorios privados
+independientes o relacionados a un anuncio, para varios IDs de usuario, un rol
+o ambos. El selector de fecha se interpreta siempre en hora Lima. Cada entrega
+conserva estado, fecha y error. Los IDs se pueden activar en Discord con el
+modo desarrollador (`Copiar ID`).
 
 ## Conocimiento del curso (RAG)
 

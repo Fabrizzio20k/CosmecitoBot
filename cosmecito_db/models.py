@@ -78,8 +78,8 @@ class Reminder(Base):
     __table_args__ = (Index("idx_reminders_pending", "status", "scheduled_for"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    announcement_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("announcements.id", ondelete="CASCADE"), nullable=False
+    announcement_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("announcements.id", ondelete="CASCADE")
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -89,7 +89,7 @@ class Reminder(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    announcement: Mapped[Announcement] = relationship(back_populates="reminders")
+    announcement: Mapped[Announcement | None] = relationship(back_populates="reminders")
     recipients: Mapped[list[ReminderRecipient]] = relationship(
         back_populates="reminder", cascade="all, delete-orphan"
     )

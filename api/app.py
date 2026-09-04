@@ -117,6 +117,7 @@ class ReminderInput(BaseModel):
     scheduled_for: datetime
     user_ids: list[int] = Field(default_factory=list, max_length=500)
     role_id: int | None = None
+    announcement_id: uuid.UUID | None = None
 
 
 def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datetime:
@@ -127,6 +128,27 @@ def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datet
     if value.tzinfo is None:
         raise HTTPException(status_code=422, detail="La fecha debe incluir zona horaria; usa UTC (Z)")
     return value.astimezone(UTC)
+
+
+def _reminder_payload(reminder: Reminder) -> dict[str, object]:
+    return {
+        "id": str(reminder.id),
+        "announcement_id": str(reminder.announcement_id) if reminder.announcement_id else None,
+        "content": reminder.content,
+        "scheduled_for": reminder.scheduled_for.isoformat(),
+        "target_role_id": reminder.target_role_id,
+        "status": reminder.status,
+        "recipients": [
+            {
+                "user_id": recipient.user_id,
+                "source": recipient.source,
+                "status": recipient.status,
+                "sent_at": recipient.sent_at.isoformat() if recipient.sent_at else None,
+                "error": recipient.error,
+            }
+            for recipient in reminder.recipients
+        ],
+    }
 
 
 def _announcement_payload(announcement: Announcement) -> dict[str, object]:
@@ -149,23 +171,7 @@ def _announcement_payload(announcement: Announcement) -> dict[str, object]:
             for channel in announcement.channels
         ],
         "reminders": [
-            {
-                "id": str(reminder.id),
-                "content": reminder.content,
-                "scheduled_for": reminder.scheduled_for.isoformat(),
-                "target_role_id": reminder.target_role_id,
-                "status": reminder.status,
-                "recipients": [
-                    {
-                        "user_id": recipient.user_id,
-                        "source": recipient.source,
-                        "status": recipient.status,
-                        "sent_at": recipient.sent_at.isoformat() if recipient.sent_at else None,
-                        "error": recipient.error,
-                    }
-                    for recipient in reminder.recipients
-                ],
-            }
+            _reminder_payload(reminder)
             for reminder in announcement.reminders
         ],
     }
@@ -184,6 +190,51 @@ async def _load_announcement(announcement_id: uuid.UUID) -> Announcement:
         if announcement is None:
             raise HTTPException(status_code=404, detail="Anuncio no encontrado")
         return announcement
+
+
+async def _load_reminder(reminder_id: uuid.UUID) -> Reminder:
+    async with database.session() as session:
+        reminder = await session.scalar(
+            select(Reminder)
+            .where(Reminder.id == reminder_id)
+            .options(selectinload(Reminder.recipients))
+        )
+        if reminder is None:
+            raise HTTPException(status_code=404, detail="Recordatorio no encontrado")
+        return reminder
+
+
+async def _create_reminder_record(
+    payload: ReminderInput,
+    announcement_id: uuid.UUID | None,
+) -> uuid.UUID:
+    user_ids = sorted(set(payload.user_ids))
+    if not user_ids and payload.role_id is None:
+        raise HTTPException(status_code=422, detail="Indica al menos un usuario o un rol destinatario")
+    if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
+        raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
+    scheduled_for = _utc_datetime(payload.scheduled_for)
+    async with database.session() as session, session.begin():
+        if announcement_id is not None:
+            announcement = await session.get(Announcement, announcement_id)
+            if announcement is None:
+                raise HTTPException(status_code=404, detail="Anuncio no encontrado")
+            if announcement.status == "cancelled":
+                raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
+        reminder = Reminder(
+            announcement_id=announcement_id,
+            content=payload.content.strip(),
+            scheduled_for=scheduled_for,
+            target_role_id=payload.role_id,
+            status="scheduled",
+            recipients=[
+                ReminderRecipient(user_id=user_id, source="direct", status="queued")
+                for user_id in user_ids
+            ],
+        )
+        session.add(reminder)
+        await session.flush()
+        return reminder.id
 
 
 @app.get("/announcements", dependencies=[Depends(require_admin)])
@@ -230,34 +281,50 @@ async def get_announcement(announcement_id: uuid.UUID) -> dict[str, object]:
     return _announcement_payload(await _load_announcement(announcement_id))
 
 
+@app.get("/reminders", dependencies=[Depends(require_admin)])
+async def list_standalone_reminders() -> list[dict[str, object]]:
+    async with database.session() as session:
+        reminders = list(
+            await session.scalars(
+                select(Reminder)
+                .where(Reminder.announcement_id.is_(None))
+                .options(selectinload(Reminder.recipients))
+                .order_by(Reminder.scheduled_for.desc())
+                .limit(100)
+            )
+        )
+        return [_reminder_payload(reminder) for reminder in reminders]
+
+
+@app.post("/reminders", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_standalone_reminder(payload: ReminderInput) -> dict[str, object]:
+    reminder_id = await _create_reminder_record(payload, payload.announcement_id)
+    return _reminder_payload(await _load_reminder(reminder_id))
+
+
 @app.post("/announcements/{announcement_id}/reminders", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def create_reminder(announcement_id: uuid.UUID, payload: ReminderInput) -> dict[str, object]:
-    user_ids = sorted(set(payload.user_ids))
-    if not user_ids and payload.role_id is None:
-        raise HTTPException(status_code=422, detail="Indica al menos un usuario o un rol destinatario")
-    if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
-        raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
-    scheduled_for = _utc_datetime(payload.scheduled_for)
-    async with database.session() as session, session.begin():
-        announcement = await session.get(Announcement, announcement_id)
-        if announcement is None:
-            raise HTTPException(status_code=404, detail="Anuncio no encontrado")
-        if announcement.status == "cancelled":
-            raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
-        reminder = Reminder(
-            announcement_id=announcement_id,
-            content=payload.content.strip(),
-            scheduled_for=scheduled_for,
-            target_role_id=payload.role_id,
-            status="scheduled",
-            recipients=[
-                ReminderRecipient(user_id=user_id, source="direct", status="queued")
-                for user_id in user_ids
-            ],
-        )
-        session.add(reminder)
-        await session.flush()
+    await _create_reminder_record(payload, announcement_id)
     return _announcement_payload(await _load_announcement(announcement_id))
+
+
+@app.delete("/reminders/{reminder_id}", dependencies=[Depends(require_admin)])
+async def cancel_reminder(reminder_id: uuid.UUID) -> dict[str, str]:
+    async with database.session() as session, session.begin():
+        reminder = await session.get(Reminder, reminder_id, with_for_update=True)
+        if reminder is None:
+            raise HTTPException(status_code=404, detail="Recordatorio no encontrado")
+        if reminder.status in {"scheduled", "processing"}:
+            reminder.status = "cancelled"
+            await session.execute(
+                update(ReminderRecipient)
+                .where(
+                    ReminderRecipient.reminder_id == reminder_id,
+                    ReminderRecipient.status.in_(["queued", "processing"]),
+                )
+                .values(status="cancelled")
+            )
+    return {"id": str(reminder_id), "status": "cancelled"}
 
 
 @app.delete("/announcements/{announcement_id}", dependencies=[Depends(require_admin)])
