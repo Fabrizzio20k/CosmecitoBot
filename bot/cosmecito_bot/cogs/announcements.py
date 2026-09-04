@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -16,6 +17,7 @@ class AnnouncementCog(commands.Cog):
 
     max_content_length = 2_000
     stale_claim_after = timedelta(minutes=5)
+    lima_timezone = ZoneInfo("America/Lima")
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -39,14 +41,14 @@ class AnnouncementCog(commands.Cog):
     @app_commands.describe(
         canal="Canal donde se publicará el anuncio",
         mensaje="Texto del anuncio",
-        fecha_iso="Opcional: fecha UTC ISO-8601, por ejemplo 2026-09-03T18:00:00Z",
+        fecha="Opcional en hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'",
     )
     async def create_announcement(
         self,
         interaction: discord.Interaction,
         canal: discord.TextChannel,
         mensaje: str,
-        fecha_iso: str | None = None,
+        fecha: str | None = None,
     ) -> None:
         if not self._can_manage(interaction):
             await interaction.response.send_message("Necesitas el permiso Gestionar servidor.", ephemeral=True)
@@ -55,7 +57,7 @@ class AnnouncementCog(commands.Cog):
             await interaction.response.send_message("El mensaje debe tener entre 1 y 2000 caracteres.", ephemeral=True)
             return
         try:
-            scheduled_for = self._parse_scheduled_for(fecha_iso)
+            scheduled_for = self._parse_lima_datetime(fecha)
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
             return
@@ -67,29 +69,29 @@ class AnnouncementCog(commands.Cog):
             created_by=interaction.user.id,
         )
         await interaction.response.send_message(
-            f"Anuncio `{announcement.id}` programado para {scheduled_for.isoformat()}.",
+            f"Anuncio `{announcement.id}` programado para {self._format_lima(scheduled_for)}.",
             ephemeral=True,
         )
         if scheduled_for <= datetime.now(UTC):
             await self._dispatch_announcements()
 
-    @app_commands.command(name="recordatorio", description="Programa un recordatorio privado de un anuncio")
+    @app_commands.command(name="recordatorio", description="Programa un recordatorio privado")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
-        anuncio_id="ID del anuncio, visible en la UI o al crear el anuncio",
         mensaje="Texto que se enviará por mensaje privado",
-        fecha_iso="Fecha UTC ISO-8601, por ejemplo 2026-09-03T18:00:00Z",
+        fecha="Hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'",
         usuario="Destinatario individual (alternativa al rol)",
         rol="Destinatarios pertenecientes a este rol (alternativa al usuario)",
+        anuncio_id="Opcional: ID del anuncio relacionado",
     )
     async def create_reminder(
         self,
         interaction: discord.Interaction,
-        anuncio_id: str,
         mensaje: str,
-        fecha_iso: str,
+        fecha: str,
         usuario: discord.Member | None = None,
         rol: discord.Role | None = None,
+        anuncio_id: str | None = None,
     ) -> None:
         if not self._can_manage(interaction):
             await interaction.response.send_message("Necesitas el permiso Gestionar servidor.", ephemeral=True)
@@ -101,8 +103,8 @@ class AnnouncementCog(commands.Cog):
             await interaction.response.send_message("El mensaje debe tener entre 1 y 2000 caracteres.", ephemeral=True)
             return
         try:
-            announcement_id = uuid.UUID(anuncio_id)
-            scheduled_for = self._parse_scheduled_for(fecha_iso, required=True)
+            announcement_id = uuid.UUID(anuncio_id) if anuncio_id else None
+            scheduled_for = self._parse_lima_datetime(fecha, required=True)
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
             return
@@ -118,7 +120,7 @@ class AnnouncementCog(commands.Cog):
             await interaction.response.send_message("No existe ese anuncio.", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"Recordatorio `{reminder.id}` programado para {scheduled_for.isoformat()}.",
+            f"Recordatorio `{reminder.id}` programado para {self._format_lima(scheduled_for)}.",
             ephemeral=True,
         )
 
@@ -142,16 +144,17 @@ class AnnouncementCog(commands.Cog):
     async def _create_reminder(
         self,
         *,
-        announcement_id: uuid.UUID,
+        announcement_id: uuid.UUID | None,
         content: str,
         scheduled_for: datetime,
         user_ids: list[int],
         role_id: int | None,
     ) -> Reminder | None:
         async with self.sessions() as session, session.begin():
-            announcement = await session.get(Announcement, announcement_id)
-            if announcement is None or announcement.status == "cancelled":
-                return None
+            if announcement_id is not None:
+                announcement = await session.get(Announcement, announcement_id)
+                if announcement is None or announcement.status == "cancelled":
+                    return None
             reminder = Reminder(
                 announcement_id=announcement_id,
                 content=content,
@@ -372,18 +375,45 @@ class AnnouncementCog(commands.Cog):
         return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild
 
     @staticmethod
-    def _parse_scheduled_for(value: str | None, *, required: bool = False) -> datetime:
+    def _parse_lima_datetime(value: str | None, *, required: bool = False) -> datetime:
         if not value:
             if required:
-                raise ValueError("Indica una fecha UTC en formato ISO-8601.")
+                raise ValueError("Indica fecha y hora Lima, por ejemplo 'mañana 18:30'.")
             return datetime.now(UTC)
+        normalized = " ".join(value.casefold().replace("mañana", "manana").split())
+        now_lima = datetime.now(AnnouncementCog.lima_timezone)
+        relative_dates = {"hoy": now_lima.date(), "manana": (now_lima + timedelta(days=1)).date()}
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            day_word, time_text = normalized.split(maxsplit=1)
+            if day_word in relative_dates:
+                hour, minute = (int(part) for part in time_text.split(":"))
+                return datetime.combine(
+                    relative_dates[day_word],
+                    datetime.min.time(),
+                    tzinfo=AnnouncementCog.lima_timezone,
+                ).replace(hour=hour, minute=minute).astimezone(UTC)
         except ValueError as error:
-            raise ValueError("La fecha debe usar ISO-8601, por ejemplo 2026-09-03T18:00:00Z.") from error
-        if parsed.tzinfo is None:
-            raise ValueError("La fecha debe incluir zona horaria; usa Z para UTC.")
-        return parsed.astimezone(UTC)
+            pass
+        try:
+            date_text, time_text = normalized.split(maxsplit=1)
+            hour, minute = (int(part) for part in time_text.split(":"))
+            date_parts = [int(part) for part in date_text.split("/")]
+            if len(date_parts) == 2:
+                day, month = date_parts
+                year = now_lima.year
+            elif len(date_parts) == 3:
+                day, month, year = date_parts
+            else:
+                raise ValueError
+            return datetime(year, month, day, hour, minute, tzinfo=AnnouncementCog.lima_timezone).astimezone(UTC)
+        except ValueError as error:
+            raise ValueError(
+                "Usa hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'."
+            ) from error
+
+    @staticmethod
+    def _format_lima(value: datetime) -> str:
+        return value.astimezone(AnnouncementCog.lima_timezone).strftime("%d/%m/%Y %H:%M (Lima)")
 
 
 async def setup(bot: commands.Bot) -> None:
