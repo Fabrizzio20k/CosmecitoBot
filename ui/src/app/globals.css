@@ -5,6 +5,8 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  --app-font-sans: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --app-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --background: oklch(0.17 0.025 270);
   --foreground: oklch(0.94 0.012 255);
   --card: oklch(0.215 0.028 270 / 92%);
@@ -35,8 +37,9 @@
 }
 
 @theme inline {
-  --font-heading: var(--font-sans);
-  --font-sans: var(--font-sans);
+  --font-heading: var(--app-font-sans);
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
   --color-background: var(--background); --color-foreground: var(--foreground);
   --color-card: var(--card); --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover); --color-popover-foreground: var(--popover-foreground);
@@ -51,7 +54,8 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  html { @apply font-sans; }
-  body { @apply min-h-svh bg-background text-foreground antialiased; background-image: radial-gradient(circle at 12% -10%, oklch(0.38 0.09 245 / 28%), transparent 32rem), radial-gradient(circle at 100% 0%, oklch(0.42 0.1 175 / 13%), transparent 30rem); }
+  html { @apply font-sans; font-family: var(--app-font-sans); }
+  body { @apply min-h-svh bg-background text-foreground antialiased; overflow-x: clip; font-family: var(--app-font-sans); background-image: radial-gradient(circle at 12% -10%, oklch(0.38 0.09 245 / 28%), transparent 32rem), radial-gradient(circle at 100% 0%, oklch(0.42 0.1 175 / 13%), transparent 30rem); }
+  button, input, select, textarea { font: inherit; }
   ::selection { background: oklch(0.77 0.16 175 / 38%); }
 }

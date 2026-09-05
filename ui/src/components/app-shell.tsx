@@ -97,12 +97,12 @@ export function AppShell({ children, title, description, actions }: AppShellProp
         <SidebarRail />
       </Sidebar>
 
-      <SidebarInset className="bg-background">
-        <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-4 border-b border-border/70 bg-background/85 px-4 backdrop-blur-xl md:px-7">
+      <SidebarInset className="min-w-0 bg-background">
+        <header className="sticky top-0 z-20 flex min-h-16 items-center justify-between gap-2 border-b border-border/70 bg-background/85 px-3 backdrop-blur-xl sm:gap-4 sm:px-4 md:px-7">
           <div className="flex min-w-0 items-center gap-3"><SidebarTrigger /><span className="hidden h-5 w-px bg-border sm:block" /><div className="min-w-0"><div className="flex items-center gap-2"><h1 className="truncate text-sm font-semibold tracking-tight">{title}</h1><Badge variant="secondary" className="hidden sm:inline-flex">Lima · UTC−5</Badge></div><p className="hidden truncate text-xs text-muted-foreground sm:block">{description}</p></div></div>
           <div className="flex shrink-0 items-center gap-2">{actions}</div>
         </header>
-        <main className="min-h-[calc(100svh-4rem)] p-4 md:p-7">{children}</main>
+        <main className="min-h-[calc(100svh-4rem)] min-w-0 p-3 sm:p-4 md:p-7">{children}</main>
       </SidebarInset>
     </SidebarProvider>
   );
