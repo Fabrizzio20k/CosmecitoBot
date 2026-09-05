@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, Integer, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -75,7 +75,10 @@ class AnnouncementChannel(Base):
 
 class Reminder(Base):
     __tablename__ = "reminders"
-    __table_args__ = (Index("idx_reminders_pending", "status", "scheduled_for"),)
+    __table_args__ = (
+        Index("idx_reminders_pending", "status", "scheduled_for"),
+        Index("idx_reminders_recurrence_group", "recurrence_group_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     announcement_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -84,6 +87,11 @@ class Reminder(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     target_role_id: Mapped[int | None] = mapped_column(BigInteger)
+    recurrence: Mapped[str] = mapped_column(String(16), default="once", nullable=False)
+    recurrence_interval: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    recurrence_weekdays: Mapped[str] = mapped_column(String(13), default="", nullable=False)
+    recurrence_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recurrence_group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -10,6 +9,7 @@ from discord.ext import commands, tasks
 from sqlalchemy import and_, func, or_, select, update
 
 from cosmecito_db.models import Announcement, AnnouncementChannel, Reminder, ReminderRecipient
+from cosmecito_db.reminder_recurrence import LIMA_TIMEZONE, next_occurrence, normalize_recurrence
 
 
 class AnnouncementCog(commands.Cog):
@@ -17,7 +17,7 @@ class AnnouncementCog(commands.Cog):
 
     max_content_length = 2_000
     stale_claim_after = timedelta(minutes=5)
-    lima_timezone = ZoneInfo("America/Lima")
+    lima_timezone = LIMA_TIMEZONE
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -77,12 +77,24 @@ class AnnouncementCog(commands.Cog):
 
     @app_commands.command(name="recordatorio", description="Programa un recordatorio privado")
     @app_commands.default_permissions(manage_guild=True)
+    @app_commands.choices(
+        repetir=[
+            app_commands.Choice(name="Una vez", value="once"),
+            app_commands.Choice(name="Cada día", value="daily"),
+            app_commands.Choice(name="Semanal", value="weekly"),
+            app_commands.Choice(name="Mensual", value="monthly"),
+        ]
+    )
     @app_commands.describe(
         mensaje="Texto que se enviará por mensaje privado",
         fecha="Hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'",
         usuario="Destinatario individual (alternativa al rol)",
         rol="Destinatarios pertenecientes a este rol (alternativa al usuario)",
         anuncio_id="Opcional: ID del anuncio relacionado",
+        repetir="Frecuencia del recordatorio",
+        cada="Cada cuántos días o meses (sólo diaria o mensual)",
+        dias_semana="Sólo semanal: lun, mie, vie",
+        hasta="Fin opcional, en hora Lima; por ejemplo '30/09 18:30'",
     )
     async def create_reminder(
         self,
@@ -92,6 +104,10 @@ class AnnouncementCog(commands.Cog):
         usuario: discord.Member | None = None,
         rol: discord.Role | None = None,
         anuncio_id: str | None = None,
+        repetir: app_commands.Choice[str] | None = None,
+        cada: app_commands.Range[int, 1, 365] = 1,
+        dias_semana: str | None = None,
+        hasta: str | None = None,
     ) -> None:
         if not self._can_manage(interaction):
             await interaction.response.send_message("Necesitas el permiso Gestionar servidor.", ephemeral=True)
@@ -105,6 +121,13 @@ class AnnouncementCog(commands.Cog):
         try:
             announcement_id = uuid.UUID(anuncio_id) if anuncio_id else None
             scheduled_for = self._parse_lima_datetime(fecha, required=True)
+            recurrence, recurrence_interval, recurrence_weekdays, recurrence_until = normalize_recurrence(
+                repetir.value if repetir else "once",
+                cada,
+                self._parse_weekdays(dias_semana),
+                scheduled_for,
+                self._parse_lima_datetime(hasta, required=True) if hasta else None,
+            )
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
             return
@@ -115,12 +138,16 @@ class AnnouncementCog(commands.Cog):
             scheduled_for=scheduled_for,
             user_ids=[usuario.id] if usuario else [],
             role_id=rol.id if rol else None,
+            recurrence=recurrence,
+            recurrence_interval=recurrence_interval,
+            recurrence_weekdays=recurrence_weekdays,
+            recurrence_until=recurrence_until,
         )
         if reminder is None:
             await interaction.response.send_message("No existe ese anuncio.", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"Recordatorio `{reminder.id}` programado para {self._format_lima(scheduled_for)}.",
+            f"Recordatorio `{reminder.id}` programado para {self._format_lima(scheduled_for)} ({self._recurrence_label(recurrence)}).",
             ephemeral=True,
         )
 
@@ -149,17 +176,28 @@ class AnnouncementCog(commands.Cog):
         scheduled_for: datetime,
         user_ids: list[int],
         role_id: int | None,
+        recurrence: str,
+        recurrence_interval: int,
+        recurrence_weekdays: tuple[int, ...],
+        recurrence_until: datetime | None,
     ) -> Reminder | None:
         async with self.sessions() as session, session.begin():
             if announcement_id is not None:
                 announcement = await session.get(Announcement, announcement_id)
                 if announcement is None or announcement.status == "cancelled":
                     return None
+            reminder_id = uuid.uuid4()
             reminder = Reminder(
+                id=reminder_id,
                 announcement_id=announcement_id,
                 content=content,
                 scheduled_for=scheduled_for,
                 target_role_id=role_id,
+                recurrence=recurrence,
+                recurrence_interval=recurrence_interval,
+                recurrence_weekdays=",".join(str(day) for day in recurrence_weekdays),
+                recurrence_until=recurrence_until,
+                recurrence_group_id=reminder_id if recurrence != "once" else None,
                 status="scheduled",
             )
             reminder.recipients = [
@@ -343,8 +381,9 @@ class AnnouncementCog(commands.Cog):
     async def _finish_reminder_without_delivery(self, reminder_id: uuid.UUID, error: str) -> None:
         async with self.sessions() as session, session.begin():
             reminder = await session.get(Reminder, reminder_id, with_for_update=True)
-            if reminder is not None:
+            if reminder is not None and reminder.status == "processing":
                 reminder.status = "failed"
+                await self._schedule_next_reminder(session, reminder)
 
     async def _finish_reminder_if_ready(self, reminder_id: uuid.UUID) -> None:
         async with self.sessions() as session, session.begin():
@@ -356,9 +395,47 @@ class AnnouncementCog(commands.Cog):
             if any(status in {"queued", "processing"} for status in statuses):
                 return
             reminder = await session.get(Reminder, reminder_id, with_for_update=True)
-            if reminder is None:
+            if reminder is None or reminder.status != "processing":
                 return
             reminder.status = "failed" if statuses and all(status == "failed" for status in statuses) else "completed"
+            await self._schedule_next_reminder(session, reminder)
+
+    async def _schedule_next_reminder(self, session, reminder: Reminder) -> None:
+        weekdays = tuple(int(day) for day in reminder.recurrence_weekdays.split(",") if day)
+        scheduled_for = next_occurrence(
+            reminder.scheduled_for,
+            reminder.recurrence,
+            reminder.recurrence_interval,
+            weekdays,
+            reminder.recurrence_until,
+        )
+        if scheduled_for is None:
+            return
+        direct_user_ids = list(
+            await session.scalars(
+                select(ReminderRecipient.user_id).where(
+                    ReminderRecipient.reminder_id == reminder.id,
+                    ReminderRecipient.source == "direct",
+                )
+            )
+        )
+        next_reminder = Reminder(
+            announcement_id=reminder.announcement_id,
+            content=reminder.content,
+            scheduled_for=scheduled_for,
+            target_role_id=reminder.target_role_id,
+            recurrence=reminder.recurrence,
+            recurrence_interval=reminder.recurrence_interval,
+            recurrence_weekdays=reminder.recurrence_weekdays,
+            recurrence_until=reminder.recurrence_until,
+            recurrence_group_id=reminder.recurrence_group_id or reminder.id,
+            status="scheduled",
+            recipients=[
+                ReminderRecipient(user_id=user_id, source="direct", status="queued")
+                for user_id in direct_user_ids
+            ],
+        )
+        session.add(next_reminder)
 
     @staticmethod
     def _aggregate_status(statuses: list[str]) -> str:
@@ -373,6 +450,26 @@ class AnnouncementCog(commands.Cog):
     @staticmethod
     def _can_manage(interaction: discord.Interaction) -> bool:
         return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.manage_guild
+
+    @staticmethod
+    def _parse_weekdays(value: str | None) -> tuple[int, ...]:
+        if not value:
+            return ()
+        names = {
+            "lun": 0, "lunes": 0, "mar": 1, "martes": 1, "mie": 2, "miercoles": 2,
+            "jue": 3, "jueves": 3, "vie": 4, "viernes": 4, "sab": 5, "sabado": 5,
+            "dom": 6, "domingo": 6,
+        }
+        values = [part.strip().casefold().replace("é", "e").replace("á", "a") for part in value.split(",")]
+        try:
+            return tuple(sorted({names[item] for item in values if item}))
+        except KeyError as error:
+            raise ValueError("Usa días separados por coma, por ejemplo: lun, mie, vie.") from error
+
+    @staticmethod
+    def _recurrence_label(recurrence: str) -> str:
+        labels = {"once": "una vez", "daily": "diario", "weekly": "semanal", "monthly": "mensual"}
+        return labels[recurrence]
 
     @staticmethod
     def _parse_lima_datetime(value: str | None, *, required: bool = False) -> datetime:

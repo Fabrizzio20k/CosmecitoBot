@@ -6,9 +6,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, status
 from openai import AsyncOpenAI
@@ -19,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from cosmecito_db import Database
 from cosmecito_db.models import Announcement, AnnouncementChannel, Reminder, ReminderRecipient
+from cosmecito_db.reminder_recurrence import normalize_recurrence
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,8 @@ class Settings:
     chunk_overlap: int
     max_document_bytes: int
     database_url: str
+    discord_token: str
+    discord_guild_id: int | None
 
 
 def get_settings() -> Settings:
@@ -44,6 +49,14 @@ def get_settings() -> Settings:
     chunk_overlap = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
     if chunk_size < 1 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
         raise RuntimeError("RAG_CHUNK_SIZE y RAG_CHUNK_OVERLAP no son válidos")
+
+    guild_id = os.getenv("DISCORD_GUILD_ID", "").strip()
+    try:
+        discord_guild_id = int(guild_id) if guild_id else None
+    except ValueError as error:
+        raise RuntimeError("DISCORD_GUILD_ID debe ser un número entero") from error
+    if discord_guild_id is not None and discord_guild_id <= 0:
+        raise RuntimeError("DISCORD_GUILD_ID debe ser positivo")
 
     return Settings(
         admin_token=admin_token,
@@ -59,6 +72,8 @@ def get_settings() -> Settings:
             "DATABASE_URL",
             "postgresql+asyncpg://cosmecito:cosmecito@127.0.0.1:5432/cosmecito",
         ),
+        discord_token=os.getenv("DISCORD_TOKEN", ""),
+        discord_guild_id=discord_guild_id,
     )
 
 
@@ -118,6 +133,10 @@ class ReminderInput(BaseModel):
     user_ids: list[int] = Field(default_factory=list, max_length=500)
     role_id: int | None = None
     announcement_id: uuid.UUID | None = None
+    recurrence: Literal["once", "daily", "weekly", "monthly"] = "once"
+    recurrence_interval: int = Field(default=1, ge=1, le=365)
+    recurrence_weekdays: list[int] = Field(default_factory=list, max_length=7)
+    recurrence_until: datetime | None = None
 
 
 def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datetime:
@@ -137,6 +156,11 @@ def _reminder_payload(reminder: Reminder) -> dict[str, object]:
         "content": reminder.content,
         "scheduled_for": reminder.scheduled_for.isoformat(),
         "target_role_id": reminder.target_role_id,
+        "recurrence": reminder.recurrence,
+        "recurrence_interval": reminder.recurrence_interval,
+        "recurrence_weekdays": [int(value) for value in reminder.recurrence_weekdays.split(",") if value],
+        "recurrence_until": reminder.recurrence_until.isoformat() if reminder.recurrence_until else None,
+        "recurrence_group_id": str(reminder.recurrence_group_id) if reminder.recurrence_group_id else None,
         "status": reminder.status,
         "recipients": [
             {
@@ -214,6 +238,19 @@ async def _create_reminder_record(
     if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
         raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
     scheduled_for = _utc_datetime(payload.scheduled_for)
+    recurrence_until = _utc_datetime(payload.recurrence_until) if payload.recurrence_until else None
+    try:
+        recurrence, recurrence_interval, recurrence_weekdays, recurrence_until = normalize_recurrence(
+            payload.recurrence,
+            payload.recurrence_interval,
+            payload.recurrence_weekdays,
+            scheduled_for,
+            recurrence_until,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if payload.role_id is not None:
+        await _require_known_discord_role(payload.role_id)
     async with database.session() as session, session.begin():
         if announcement_id is not None:
             announcement = await session.get(Announcement, announcement_id)
@@ -221,11 +258,18 @@ async def _create_reminder_record(
                 raise HTTPException(status_code=404, detail="Anuncio no encontrado")
             if announcement.status == "cancelled":
                 raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
+        reminder_id = uuid.uuid4()
         reminder = Reminder(
+            id=reminder_id,
             announcement_id=announcement_id,
             content=payload.content.strip(),
             scheduled_for=scheduled_for,
             target_role_id=payload.role_id,
+            recurrence=recurrence,
+            recurrence_interval=recurrence_interval,
+            recurrence_weekdays=",".join(str(day) for day in recurrence_weekdays),
+            recurrence_until=recurrence_until,
+            recurrence_group_id=reminder_id if recurrence != "once" else None,
             status="scheduled",
             recipients=[
                 ReminderRecipient(user_id=user_id, source="direct", status="queued")
@@ -235,6 +279,47 @@ async def _create_reminder_record(
         session.add(reminder)
         await session.flush()
         return reminder.id
+
+
+async def _discord_roles() -> list[dict[str, object]]:
+    if not settings.discord_token or settings.discord_guild_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Configura DISCORD_TOKEN y DISCORD_GUILD_ID para consultar roles.",
+        )
+    url = f"https://discord.com/api/v10/guilds/{settings.discord_guild_id}/roles"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, headers={"Authorization": f"Bot {settings.discord_token}"})
+        response.raise_for_status()
+        roles = response.json()
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No se pudieron consultar los roles de Discord.",
+        ) from error
+    if not isinstance(roles, list):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Discord devolvió roles inválidos.")
+    return [
+        {
+            "id": int(role["id"]),
+            "name": str(role["name"]),
+            "color": int(role.get("color", 0)),
+            "managed": bool(role.get("managed", False)),
+        }
+        for role in roles
+        if isinstance(role, dict) and str(role.get("id", "")).isdigit() and int(role["id"]) != settings.discord_guild_id
+    ]
+
+
+async def _require_known_discord_role(role_id: int) -> None:
+    if role_id not in {role["id"] for role in await _discord_roles()}:
+        raise HTTPException(status_code=422, detail="El rol seleccionado ya no existe en este servidor de Discord.")
+
+
+@app.get("/discord/roles", dependencies=[Depends(require_admin)])
+async def list_discord_roles() -> list[dict[str, object]]:
+    return sorted(await _discord_roles(), key=lambda role: str(role["name"]).casefold())
 
 
 @app.get("/announcements", dependencies=[Depends(require_admin)])
@@ -314,12 +399,25 @@ async def cancel_reminder(reminder_id: uuid.UUID) -> dict[str, str]:
         reminder = await session.get(Reminder, reminder_id, with_for_update=True)
         if reminder is None:
             raise HTTPException(status_code=404, detail="Recordatorio no encontrado")
-        if reminder.status in {"scheduled", "processing"}:
-            reminder.status = "cancelled"
+        reminder_ids = [reminder_id]
+        if reminder.recurrence_group_id is not None:
+            reminder_ids = list(
+                await session.scalars(
+                    select(Reminder.id)
+                    .where(Reminder.recurrence_group_id == reminder.recurrence_group_id)
+                    .with_for_update()
+                )
+            )
+        if reminder.status in {"scheduled", "processing"} or len(reminder_ids) > 1:
+            await session.execute(
+                update(Reminder)
+                .where(Reminder.id.in_(reminder_ids), Reminder.status.in_(["scheduled", "processing"]))
+                .values(status="cancelled")
+            )
             await session.execute(
                 update(ReminderRecipient)
                 .where(
-                    ReminderRecipient.reminder_id == reminder_id,
+                    ReminderRecipient.reminder_id.in_(reminder_ids),
                     ReminderRecipient.status.in_(["queued", "processing"]),
                 )
                 .values(status="cancelled")

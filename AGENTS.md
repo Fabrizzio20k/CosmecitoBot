@@ -45,7 +45,7 @@ privada predeterminada de Compose.
 | `postgres` | Base de datos de aplicación. | Volumen `postgres-data`. | Interna; no publica puertos. |
 | `migrations` | Aplica Alembic e importa el historial SQLite una vez. | Espera `postgres` saludable. | Job de una sola ejecución. |
 | `bot` | Bot de Discord, chat, scheduler de anuncios/recordatorios. | `migrations`, `chat`, `embeddings`, `qdrant`. | Conexión saliente a Discord. |
-| `api` | API FastAPI para documentos y anuncios. | `migrations`, `embeddings`, `qdrant`. | Sólo interna; la UI la consume. |
+| `api` | API FastAPI para documentos, anuncios y catálogo de roles Discord. | `migrations`, `embeddings`, `qdrant`. | Sólo interna; la UI la consume. |
 | `ui` | Panel Next.js con autenticación de administrador. | `api`; `proxy_net`. | Único servicio accesible desde Caddy. |
 | `qdrant` | Colección vectorial para RAG. | Volumen `qdrant-storage`. | Interna. |
 | `chat` | `llama-server` para completions. | Volumen `llama-models`. | Interna, puerto 8080. |
@@ -138,7 +138,9 @@ empaquetar antes ese módulo.
 3. La UI o `/recordatorio` crea un `Reminder` independiente con uno o varios
    usuarios y/o un ID de rol; el anuncio relacionado es opcional.
 4. Al vencer la fecha, el bot materializa miembros del rol, manda DM a cada
-   destinatario y conserva estado, intento, fecha y error individual.
+   destinatario y conserva estado, intento, fecha y error individual. Las
+   recurrencias diaria, semanal o mensual crean una nueva entrega auditable al
+   finalizar; cancelar una de sus entregas cancela las futuras de esa serie.
 
 Estados de entrega: `queued`, `processing`, `sent`, `failed`, `cancelled`.
 Una reclamación `processing` con más de cinco minutos se puede recuperar tras
@@ -154,6 +156,7 @@ Rutas administrativas relevantes:
 | `GET` | `/announcements/{id}` | Devuelve un anuncio concreto. |
 | `POST` | `/announcements/{id}/reminders` | Programa DM para IDs de usuario y/o rol. |
 | `GET` / `POST` | `/reminders` | Lista o crea recordatorios independientes. |
+| `GET` | `/discord/roles` | Lista los roles del servidor para la UI administrativa. |
 | `DELETE` | `/reminders/{id}` | Cancela un recordatorio pendiente. |
 | `DELETE` | `/announcements/{id}` | Cancela entregas y recordatorios aún pendientes. |
 

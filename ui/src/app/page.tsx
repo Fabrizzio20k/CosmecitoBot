@@ -1,220 +1,48 @@
 "use client";
 
-import { type ChangeEvent, type KeyboardEvent, useEffect, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { ChangeEvent, KeyboardEvent, useEffect, useState } from "react";
+import { toast } from "sonner";
+import { FilePlus2, FileText, FolderOpen, RefreshCw, Save, Trash2, Upload } from "lucide-react";
 
-type DocumentSummary = {
-  id: string;
-  source: string;
-  title: string;
-  updated_at: string;
-};
+import { AppShell } from "@/components/app-shell";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogMedia, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 
+type DocumentSummary = { id: string; source: string; title: string; updated_at: string };
 type DocumentContent = DocumentSummary & { content: string; reconstructed?: boolean };
-
 const api = "/api";
-const blankDocument = (): DocumentContent => ({
-  id: "",
-  source: "nuevo-documento.md",
-  title: "Nuevo documento",
-  updated_at: "",
-  content: "# Nuevo documento\n\nEscribe aquí el conocimiento que debe usar el bot.",
-});
+const blankDocument = (): DocumentContent => ({ id: "", source: "nuevo-documento.md", title: "Nuevo documento", updated_at: "", content: "# Nuevo documento\n\nEscribe aquí el conocimiento que debe usar el bot." });
 
 export default function Home() {
-  const router = useRouter();
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [document, setDocument] = useState<DocumentContent>(blankDocument);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [message, setMessage] = useState("Cargando biblioteca…");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    void loadDocuments();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => { void loadDocuments(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  async function request(path: string, init: RequestInit = {}) { const response = await fetch(`${api}${path}`, { ...init, cache: "no-store" }); if (!response.ok) { const body = await response.json().catch(() => ({ detail: "Error inesperado" })); throw new Error(body.detail ?? "Error inesperado"); } return response; }
+  async function loadDocuments() { try { setBusy(true); setDocuments(await (await request("/documents")).json()); setMessage(""); } catch (error) { setDocuments([]); setMessage(error instanceof Error ? error.message : "No se pudo cargar la biblioteca."); } finally { setBusy(false); } }
+  async function openDocument(summary: DocumentSummary) { try { setBusy(true); const opened: DocumentContent = await (await request(`/documents/${encodeURIComponent(summary.id)}`)).json(); setDocument({ ...opened, updated_at: summary.updated_at }); setSavedId(summary.id); setMessage(opened.reconstructed ? "Borrador reconstruido desde chunks antiguos. Revísalo y guarda para migrarlo al editor." : ""); } catch (error) { setMessage(error instanceof Error ? error.message : "No se pudo abrir el documento."); } finally { setBusy(false); } }
+  async function saveDocument() { if (!document.content.trim()) { setMessage("Escribe contenido antes de guardar."); return; } try { setBusy(true); const data = new FormData(); data.append("content", document.content); data.append("title", document.title.trim() || "Documento sin título"); data.append("source", document.source.trim() || "documento.md"); if (!savedId && document.id.trim()) data.append("document_id", document.id.trim()); const endpoint = savedId ? `/documents/${encodeURIComponent(savedId)}` : "/documents"; const result = await (await request(endpoint, { method: savedId ? "PUT" : "POST", body: data })).json(); setSavedId(result.id); setDocument((current) => ({ ...current, id: result.id, title: result.title })); setMessage(`Guardado · ${result.chunks} fragmentos listos para el bot.`); toast.success("Documento guardado", { description: `${result.chunks} fragmentos indexados para el bot.` }); await loadDocuments(); } catch (error) { const detail = error instanceof Error ? error.message : "No se pudo guardar el documento."; setMessage(detail); toast.error("No se pudo guardar", { description: detail }); } finally { setBusy(false); } }
+  async function deleteDocument() { if (!savedId) return; try { setBusy(true); await request(`/documents/${encodeURIComponent(savedId)}`, { method: "DELETE" }); setDocument(blankDocument()); setSavedId(null); setMessage("Documento eliminado de Qdrant."); toast.success("Documento eliminado"); await loadDocuments(); } catch (error) { const detail = error instanceof Error ? error.message : "No se pudo eliminar el documento."; setMessage(detail); toast.error("No se pudo eliminar", { description: detail }); } finally { setBusy(false); } }
+  async function importFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; try { const content = await file.text(); setDocument({ id: file.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), source: file.name, title: firstHeading(content) || file.name.replace(/\.[^.]+$/, ""), updated_at: "", content }); setSavedId(null); setMessage(`Importado: ${file.name}. Revisa el texto y guarda.`); toast.success("Archivo importado", { description: file.name }); } catch { setMessage("No se pudo leer el archivo. Debe ser texto UTF-8."); } finally { event.target.value = ""; } }
+  function newDocument() { setDocument(blankDocument()); setSavedId(null); setMessage("Documento nuevo sin guardar."); }
+  function handleKeyboardShortcut(event: KeyboardEvent<HTMLElement>) { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); if (!busy) void saveDocument(); } }
 
-  async function request(path: string, init: RequestInit = {}) {
-    const response = await fetch(`${api}${path}`, { ...init, cache: "no-store" });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({ detail: "Error inesperado" }));
-      throw new Error(body.detail ?? "Error inesperado");
-    }
-    return response;
-  }
-
-  async function loadDocuments() {
-    try {
-      setBusy(true);
-      const response = await request("/documents");
-      setDocuments(await response.json());
-      setMessage("");
-    } catch (error) {
-      setDocuments([]);
-      setMessage(error instanceof Error ? error.message : "No se pudo cargar la biblioteca.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function openDocument(summary: DocumentSummary) {
-    try {
-      setBusy(true);
-      const response = await request(`/documents/${encodeURIComponent(summary.id)}`);
-      const opened: DocumentContent = await response.json();
-      setDocument({ ...opened, updated_at: summary.updated_at });
-      setSavedId(summary.id);
-      setMessage(
-        opened.reconstructed
-          ? "Borrador reconstruido desde chunks antiguos. Revísalo y guarda para migrarlo al editor."
-          : "",
-      );
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo abrir el documento.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveDocument() {
-    if (!document.content.trim()) {
-      setMessage("Escribe contenido antes de guardar.");
-      return;
-    }
-    try {
-      setBusy(true);
-      const data = new FormData();
-      data.append("content", document.content);
-      data.append("title", document.title.trim() || "Documento sin título");
-      data.append("source", document.source.trim() || "documento.md");
-      if (!savedId && document.id.trim()) data.append("document_id", document.id.trim());
-
-      const endpoint = savedId ? `/documents/${encodeURIComponent(savedId)}` : "/documents";
-      const response = await request(endpoint, { method: savedId ? "PUT" : "POST", body: data });
-      const result = await response.json();
-      setSavedId(result.id);
-      setDocument((current) => ({ ...current, id: result.id, title: result.title }));
-      setMessage(`Guardado · ${result.chunks} fragmentos listos para el bot.`);
-      await loadDocuments();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo guardar el documento.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function deleteDocument() {
-    if (!savedId || !window.confirm(`¿Eliminar "${document.title}" de la biblioteca?`)) return;
-    try {
-      setBusy(true);
-      await request(`/documents/${encodeURIComponent(savedId)}`, { method: "DELETE" });
-      setDocument(blankDocument());
-      setSavedId(null);
-      setMessage("Documento eliminado de Qdrant.");
-      await loadDocuments();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "No se pudo eliminar el documento.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function importFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const content = await file.text();
-      setDocument({
-        id: file.name.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""),
-        source: file.name,
-        title: firstHeading(content) || file.name.replace(/\.[^.]+$/, ""),
-        updated_at: "",
-        content,
-      });
-      setSavedId(null);
-      setMessage(`Importado: ${file.name}. Revisa el texto y guarda.`);
-    } catch {
-      setMessage("No se pudo leer el archivo. Debe ser texto UTF-8.");
-    } finally {
-      event.target.value = "";
-    }
-  }
-
-  function newDocument() {
-    setDocument(blankDocument());
-    setSavedId(null);
-    setMessage("Documento nuevo sin guardar.");
-  }
-
-  function handleKeyboardShortcut(event: KeyboardEvent<HTMLElement>) {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      if (!busy) void saveDocument();
-    }
-  }
-
-  async function logout() {
-    await fetch("/auth/logout", { method: "POST" });
-    router.replace("/login");
-    router.refresh();
-  }
-
-  return (
-    <main className="workspace" onKeyDown={handleKeyboardShortcut}>
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">C</span>
-          <div><strong>CosmecitoBot</strong><small>Biblioteca RAG</small></div>
-        </div>
-        <button className="new-button" type="button" onClick={newDocument}>＋ Nuevo documento</button>
-        <label className="import-button">
-          Importar archivo
-          <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importFile} />
-        </label>
-        <div className="library-header"><span>DOCUMENTOS</span><button type="button" onClick={() => void loadDocuments()} disabled={busy}>↻</button></div>
-        <nav className="document-list" aria-label="Documentos indexados">
-          {documents.length === 0 ? <p>Aún no hay documentos.</p> : documents.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={savedId === item.id ? "document-item active" : "document-item"}
-              onClick={() => void openDocument(item)}
-            >
-              <strong>{item.title}</strong><span>{item.source}</span>
-            </button>
-          ))}
-        </nav>
-      </aside>
-
-      <section className="editor-area">
-        <header className="topbar">
-          <div><span className="status-dot" />{savedId ? "Documento indexado" : "Borrador"}</div>
-          <div className="topbar-actions">
-            <Link className="topbar-link" href="/announcements">Anuncios</Link>
-            <button type="button" className="logout-button" onClick={() => void logout()}>Salir</button>
-            {savedId && <button type="button" className="delete-button" onClick={() => void deleteDocument()} disabled={busy}>Eliminar</button>}
-            <button type="button" className="save-button" onClick={() => void saveDocument()} disabled={busy}>{busy ? "Guardando…" : "Guardar cambios"}</button>
-          </div>
-        </header>
-
-        <div className="editor-shell">
-          <div className="metadata">
-            <input className="title-input" value={document.title} onChange={(event) => setDocument({ ...document, title: event.target.value })} placeholder="Título del documento" />
-            <div className="metadata-row">
-              <label>Origen<input value={document.source} onChange={(event) => setDocument({ ...document, source: event.target.value })} placeholder="material-semana-1.md" /></label>
-              <label>Identificador<input value={document.id} onChange={(event) => setDocument({ ...document, id: event.target.value })} disabled={Boolean(savedId)} placeholder="semana-1" /></label>
-            </div>
-          </div>
-          <div className="editor-label"><span>MARKDOWN</span><span>{document.content.length.toLocaleString()} caracteres</span></div>
-          <textarea value={document.content} onChange={(event) => setDocument({ ...document, content: event.target.value })} spellCheck={false} aria-label="Editor Markdown" />
-          <footer className="editor-footer"><span>Usa # para títulos y separa párrafos con una línea vacía.</span>{message && <span className="message">{message}</span>}</footer>
-        </div>
-      </section>
-    </main>
-  );
+  return <AppShell title="Biblioteca de conocimiento" description="Edita el contexto que utiliza CosmecitoBot para responder" actions={<><Badge variant={savedId ? "secondary" : "outline"} className="hidden md:inline-flex">{savedId ? "Indexado" : "Borrador"}</Badge><Button onClick={() => void saveDocument()} disabled={busy}><Save />{busy ? "Guardando" : "Guardar"}</Button></>}>
+    <div className="mx-auto grid max-w-7xl gap-5 xl:grid-cols-[19rem_minmax(0,1fr)]" onKeyDown={handleKeyboardShortcut}>
+      <Card className="overflow-hidden border-border/80 bg-card/85 shadow-xl shadow-black/10 xl:min-h-[calc(100svh-8.5rem)]"><CardHeader className="gap-4"><div><CardTitle className="text-base">Tu biblioteca</CardTitle><CardDescription>Material disponible para el asistente.</CardDescription></div><div className="grid grid-cols-2 gap-2"><Button variant="secondary" onClick={newDocument}><FilePlus2 />Nuevo</Button><Button variant="outline" render={<label />}><Upload />Importar<input className="sr-only" type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" onChange={importFile} /></Button></div></CardHeader><Separator /><div className="flex items-center justify-between px-6 py-3"><span className="text-xs font-medium text-muted-foreground">{documents.length} documentos</span><Button variant="ghost" size="icon-sm" onClick={() => void loadDocuments()} disabled={busy} aria-label="Actualizar documentos"><RefreshCw className={busy ? "animate-spin" : ""} /></Button></div><ScrollArea className="h-[20rem] px-3 xl:h-[calc(100svh-23rem)]"><div className="grid gap-1 pb-3">{busy && !documents.length ? Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-14 w-full" />) : documents.length ? documents.map((item) => <button key={item.id} type="button" onClick={() => void openDocument(item)} className={`group grid w-full gap-1 rounded-xl px-3 py-3 text-left transition-colors ${savedId === item.id ? "bg-primary text-primary-foreground shadow-sm" : "hover:bg-muted"}`}><span className="flex items-center gap-2"><FileText className="size-3.5" /><strong className="truncate text-sm font-medium">{item.title}</strong></span><span className={`truncate pl-5 text-xs ${savedId === item.id ? "text-primary-foreground/70" : "text-muted-foreground"}`}>{item.source}</span></button>) : <div className="grid place-items-center gap-2 px-4 py-14 text-center text-sm text-muted-foreground"><FolderOpen className="size-5" />Aún no hay documentos.</div>}</div></ScrollArea></Card>
+      <Card className="overflow-hidden border-border/80 bg-card/85 shadow-xl shadow-black/10"><CardHeader className="gap-5 pb-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-xl tracking-tight">{document.title || "Documento sin título"}</CardTitle><CardDescription className="mt-1">{savedId ? "Los cambios se indexarán al guardar." : "Este documento todavía no está disponible para el bot."}</CardDescription></div>{savedId && <AlertDialog><AlertDialogTrigger render={<Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" />}><Trash2 />Eliminar</AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogMedia><Trash2 /></AlertDialogMedia><AlertDialogTitle>¿Eliminar este documento?</AlertDialogTitle><AlertDialogDescription>Se retirará de Qdrant y el bot dejará de usarlo como contexto.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Conservar</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void deleteDocument()}>Eliminar</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>}</div><div className="grid gap-3 md:grid-cols-2"><label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Título<Input value={document.title} onChange={(event) => setDocument({ ...document, title: event.target.value })} placeholder="Título del documento" /></label><label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Origen<Input value={document.source} onChange={(event) => setDocument({ ...document, source: event.target.value })} placeholder="material-semana-1.md" /></label></div></CardHeader><Separator /><CardContent className="grid gap-3 p-5"><div className="flex items-center justify-between text-xs text-muted-foreground"><span className="font-medium tracking-wide">MARKDOWN</span><span>{document.content.length.toLocaleString()} caracteres</span></div><Textarea value={document.content} onChange={(event) => setDocument({ ...document, content: event.target.value })} spellCheck={false} aria-label="Editor Markdown" className="min-h-[28rem] resize-y bg-background/50 font-mono text-[13px] leading-7 shadow-inner shadow-black/10" /><div className="flex flex-col justify-between gap-2 text-xs text-muted-foreground sm:flex-row"><span>Usa # para títulos y separa párrafos con una línea vacía.</span>{message && <span className="text-primary">{message}</span>}</div></CardContent></Card>
+    </div>
+  </AppShell>;
 }
 
-function firstHeading(content: string) {
-  return content.match(/^#\s+(.+?)\s*$/m)?.[1] ?? "";
-}
+function firstHeading(content: string) { return content.match(/^#\s+(.+?)\s*$/m)?.[1] ?? ""; }

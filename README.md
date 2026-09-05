@@ -103,7 +103,8 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/ping` comprueba que el bot esté conectado.
 - `/anuncio` registra un anuncio para un canal, inmediato o programado en hora Lima.
 - `/recordatorio` programa un DM independiente para una persona o los miembros
-  de un rol; puede enlazarse opcionalmente a un anuncio.
+  de un rol; puede enlazarse opcionalmente a un anuncio. Permite una vez,
+  diaria, semanal (uno o varios días) o mensual, con fecha de término opcional.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
 máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
@@ -119,9 +120,13 @@ como envío fallido en la UI.
 La UI tiene una sección **Anuncios**. Desde ella se crean anuncios globales en
 uno o varios canales mediante IDs de canal y recordatorios privados
 independientes o relacionados a un anuncio, para varios IDs de usuario, un rol
-o ambos. El selector de fecha se interpreta siempre en hora Lima. Cada entrega
-conserva estado, fecha y error. Los IDs se pueden activar en Discord con el
-modo desarrollador (`Copiar ID`).
+o ambos. Los roles se cargan desde el servidor de Discord en un selector: el
+token del bot sólo lo usa la API y nunca se entrega al navegador. El selector
+de fecha se interpreta siempre en hora Lima; los recordatorios permiten una
+vez, diario, semanal (días elegidos) o mensual, con fecha de fin opcional. Cada
+entrega conserva estado, fecha y error; cancelar una serie detiene todas sus
+futuras repeticiones. Los IDs se pueden activar en Discord con el modo
+desarrollador (`Copiar ID`).
 
 ## Conocimiento del curso (RAG)
 
