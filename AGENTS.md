@@ -167,18 +167,23 @@ Rutas administrativas relevantes:
 | `DELETE` | `/announcements/{id}` | Cancela entregas y recordatorios aún pendientes. |
 
 Los comandos Discord exigen `Manage Guild`. `/anuncio` expone canal, mensaje,
-fecha natural opcional y archivo; `/recordatorio` expone destinatarios
-combinados, mensaje, fecha natural opcional y archivo. El modelo muestra la
+programación determinista opcional y archivo; `/recordatorio` expone destinatarios
+combinados, mensaje, fecha natural opcional y archivo. La confirmación muestra la
 fecha/hora normalizada y la recurrencia antes de persistir, con botones de
-confirmar o corregir. Discord permite un adjunto por slash command; para varios
+confirmar o corregir. La programación no usa un modelo: acepta fórmulas como
+`18/09/2026 a las 18:00`, `mañana a las 18:00` y `todos los viernes desde el
+18 de setiembre a las 6pm hasta el 30 de noviembre`; la fecha límite detiene
+las recurrencias. Una regla semanal puede combinar días, por ejemplo `todos los
+lunes, miércoles y viernes desde el 18/09/2026 a las 18:00`; `/ayuda` muestra
+estas fórmulas dentro de Discord. Discord permite un adjunto por slash command; para varios
 se usa un ZIP o la UI. Para los destinatarios por rol,
 mantén activado **Server Members Intent** en el portal de Discord y en el bot;
 sin él no se puede expandir el rol de forma fiable. Los usuarios pueden cerrar
 sus DM: eso es una entrega fallida esperada y debe mostrarse, no ocultarse.
 
-La UI manda una instrucción natural al endpoint de previsualización; el modelo
-local sólo propone `fecha + hora + recurrencia`. La API rechaza respuestas
-ambiguas, fechas pasadas y recurrencias fuera de `daily`, `weekly` o `monthly`.
+La UI manda una instrucción al endpoint de previsualización; un parser
+determinista valida fecha, hora, recurrencia y días semanales. La API rechaza
+fórmulas ambiguas, fechas pasadas y recurrencias fuera de `daily`, `weekly` o `monthly`.
 La recurrencia se calcula de forma determinista en hora Lima y, al terminar una
 entrega, el bot crea transaccionalmente la siguiente ocurrencia. Los adjuntos se
 persisten en `message_attachments` (máximo 10; 8 MiB por archivo y 20 MiB por

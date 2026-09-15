@@ -101,11 +101,17 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/meme imagen: texto:` genera un meme. Separa texto superior e inferior con
   `|`.
 - `/ping` comprueba que el bot esté conectado.
-- `/anuncio` pide canal, mensaje, fecha natural opcional y un archivo opcional;
-  muestra la interpretación Lima y pide confirmación antes de guardar.
+- `/anuncio` pide canal, mensaje, programación opcional y un archivo opcional.
+  La programación es determinista, siempre en Lima, y se confirma antes de guardar:
+  `18/09/2026 a las 18:00`, `mañana a las 18:00` o `todos los viernes desde
+  el 18 de setiembre a las 6pm hasta el 30 de noviembre`.
+- `/ayuda` muestra la guía dentro de Discord. Las recurrencias semanales pueden
+  combinar días: `todos los lunes, miércoles y viernes desde el 18/09/2026 a
+  las 6pm`.
 - `/recordatorio` recibe un único campo de destinatarios combinados (menciones
   de personas, un rol y/o `yo`), mensaje, fecha natural opcional y un archivo.
-  La confirmación muestra la programación normalizada antes de crear los DMs.
+  La confirmación muestra la programación normalizada antes de crear los DMs;
+  usa las mismas fórmulas deterministas de fecha y repetición que `/anuncio`.
   Discord admite un adjunto por slash command; para varios usa un ZIP o la UI.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como

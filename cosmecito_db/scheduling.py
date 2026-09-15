@@ -11,7 +11,9 @@ LIMA_TIMEZONE = ZoneInfo("America/Lima")
 RECURRENCES = frozenset({"once", "daily", "weekly", "monthly"})
 
 
-def next_occurrence(value: datetime, recurrence: str) -> datetime | None:
+def next_occurrence(
+    value: datetime, recurrence: str, weekdays: tuple[int, ...] = ()
+) -> datetime | None:
     """Devuelve la siguiente ocurrencia conservando la hora local de Lima."""
     if recurrence == "once":
         return None
@@ -22,7 +24,12 @@ def next_occurrence(value: datetime, recurrence: str) -> datetime | None:
     if recurrence == "daily":
         next_local = local + timedelta(days=1)
     elif recurrence == "weekly":
-        next_local = local + timedelta(weeks=1)
+        enabled_days = weekdays or (local.weekday(),)
+        next_local = next(
+            local + timedelta(days=offset)
+            for offset in range(1, 8)
+            if (local + timedelta(days=offset)).weekday() in enabled_days
+        )
     else:
         year = local.year + (local.month == 12)
         month = 1 if local.month == 12 else local.month + 1

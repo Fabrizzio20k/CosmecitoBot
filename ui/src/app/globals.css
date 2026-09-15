@@ -2,7 +2,17 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-:root { --bg: #0c1016; --panel: #131a23; --panel-soft: #19212c; --line: #2a3543; --text: #e7edf4; --muted: #91a0b2; --accent: #81e6bb; --accent-ink: #072117; --danger: #ff9d9d; }
+:root {
+  --background: #071b14; --foreground: #eafbf2; --card: #0c291e; --card-foreground: #eafbf2;
+  --popover: #0d3023; --popover-foreground: #eafbf2; --primary: #48d597; --primary-foreground: #042016;
+  --secondary: #163d2c; --secondary-foreground: #dcfce7; --muted: #123225; --muted-foreground: #9ac4af;
+  --accent: #1b5139; --accent-foreground: #eafff3; --destructive: #f87171; --border: #286044;
+  --input: #24573e; --ring: #56e6a5; --sidebar: #06170f; --sidebar-foreground: #eafbf2;
+  --sidebar-primary: #48d597; --sidebar-primary-foreground: #042016; --sidebar-accent: #123c2a;
+  --sidebar-accent-foreground: #eafbf2; --sidebar-border: #245b40; --sidebar-ring: #56e6a5;
+  --bg: #071b14; --panel: #0c291e; --panel-soft: #123225; --line: #286044; --text: #eafbf2;
+  --accent: #48d597; --accent-ink: #042016; --danger: #fca5a5;
+}
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: Arial, Helvetica, sans-serif; }
 button, input, textarea { font: inherit; }

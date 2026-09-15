@@ -54,6 +54,8 @@ class Announcement(Base):
     created_by: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
     recurrence: Mapped[str] = mapped_column(String(16), default="once", nullable=False)
+    recurrence_weekdays: Mapped[str] = mapped_column(String(13), default="", nullable=False)
+    recurrence_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recurrence_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

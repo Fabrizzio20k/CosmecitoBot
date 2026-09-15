@@ -5,7 +5,7 @@ import secrets
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
 from sqlalchemy import select, update
@@ -29,6 +29,7 @@ from cosmecito_db.models import (
     ReminderRecipient,
 )
 from cosmecito_db.reminder_recurrence import normalize_recurrence
+from cosmecito_db.schedule_parser import Schedule, parse_schedule as parse_schedule_instruction
 from cosmecito_db.scheduling import LIMA_TIMEZONE, RECURRENCES
 
 
@@ -103,11 +104,6 @@ embeddings_client = AsyncOpenAI(
     api_key="local-llama-cpp",
     timeout=600,
 )
-scheduler_client = AsyncOpenAI(
-    base_url=settings.llama_cpp_base_url,
-    api_key="local-llama-cpp",
-    timeout=settings.scheduler_model_timeout_seconds,
-)
 database = Database(settings.database_url)
 app = FastAPI(title="Cosmecito knowledge API", version="1.0.0")
 
@@ -132,7 +128,6 @@ async def require_admin(
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await qdrant.close()
-    await scheduler_client.close()
     await database.close()
 
 
@@ -154,6 +149,8 @@ class AnnouncementInput(BaseModel):
     channel_ids: list[int] = Field(min_length=1, max_length=25)
     scheduled_for: datetime | None = None
     recurrence: str = Field(default="once", pattern="^(once|daily|weekly|monthly)$")
+    recurrence_weekdays: list[int] = Field(default_factory=list, max_length=7)
+    recurrence_until: datetime | None = None
     created_by: int | None = None
 
 
@@ -177,7 +174,7 @@ def _format_lima(value: datetime) -> str:
     return value.astimezone(LIMA_TIMEZONE).strftime("%A %d/%m/%Y, %H:%M (Lima)")
 
 
-def _schedule_payload(value: datetime, recurrence: str) -> dict[str, str]:
+def _schedule_payload(plan: Schedule) -> dict[str, object]:
     labels = {
         "once": "una sola vez",
         "daily": "todos los días",
@@ -185,83 +182,27 @@ def _schedule_payload(value: datetime, recurrence: str) -> dict[str, str]:
         "monthly": "cada mes",
     }
     return {
-        "scheduled_for": value.isoformat(),
-        "recurrence": recurrence,
-        "summary": f"{_format_lima(value)} · {labels[recurrence]}",
+        "scheduled_for": plan.scheduled_for.isoformat(),
+        "recurrence": plan.recurrence,
+        "recurrence_weekdays": list(plan.recurrence_weekdays),
+        "recurrence_until": plan.recurrence_until.isoformat() if plan.recurrence_until else None,
+        "summary": (
+            f"{_format_lima(plan.scheduled_for)} · {labels[plan.recurrence]}"
+            + (f" · hasta {_format_lima(plan.recurrence_until)}" if plan.recurrence_until else "")
+        ),
         "timezone": "America/Lima",
     }
 
 
-def _schedule_from_model(content: str, now: datetime) -> tuple[datetime, str]:
-    match = re.search(r"\{.*\}", content.strip(), flags=re.DOTALL)
-    if match is None:
-        raise ValueError("El modelo no devolvió una fecha válida.")
-    try:
-        result = json.loads(match.group())
-        if (
-            not isinstance(result, dict)
-            or not isinstance(result.get("date"), str)
-            or not isinstance(result.get("time"), str)
-            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["date"])
-            or not re.fullmatch(r"\d{2}:\d{2}", result["time"])
-        ):
-            raise ValueError
-        scheduled_date = date.fromisoformat(result["date"])
-        scheduled_time = time.fromisoformat(result["time"])
-        recurrence = result["recurrence"]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError("El modelo no devolvió una programación válida.") from error
-    if recurrence not in RECURRENCES:
-        raise ValueError("La repetición indicada no está permitida.")
-    scheduled_for = datetime.combine(
-        scheduled_date, scheduled_time, tzinfo=LIMA_TIMEZONE
-    ).astimezone(UTC)
-    if scheduled_for <= now:
-        raise ValueError("La fecha interpretada ya pasó. Indica una fecha y hora futuras.")
-    return scheduled_for, recurrence
-
-
 @app.post("/schedules/parse", dependencies=[Depends(require_admin)])
-async def parse_schedule(payload: ScheduleInstruction) -> dict[str, str]:
-    now = datetime.now(UTC)
-    now_lima = now.astimezone(LIMA_TIMEZONE)
-    system_prompt = """Eres un analizador de calendario, no un asistente conversacional.
-Interpreta la instrucción en español para programar un mensaje en America/Lima.
-Devuelve exclusivamente JSON válido con exactamente estas claves:
-{"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"once|daily|weekly|monthly"}.
-Usa recurrence daily solo si se pide cada día/todos los días; weekly solo si se pide cada semana o un día de la semana; monthly solo si se pide cada mes. Si no se pide repetición, usa once.
-Resuelve las referencias relativas contra la fecha/hora entregada. No inventes destinatarios ni cambies la hora. Si la instrucción es ambigua o no indica hora y fecha suficientes, devuelve {"error":"..."}."""
+async def parse_schedule(payload: ScheduleInstruction) -> dict[str, object]:
     try:
-        completion = await scheduler_client.chat.completions.create(
-            model=settings.llama_cpp_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "now_lima": now_lima.strftime("%Y-%m-%d %H:%M"),
-                            "instruction": payload.instruction.strip(),
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-            temperature=0,
-            max_tokens=120,
-        )
-    except (APITimeoutError, APIConnectionError, APIStatusError) as error:
-        raise HTTPException(
-            status_code=503, detail="No se pudo consultar el modelo de programación."
-        ) from error
-    response = completion.choices[0].message.content or ""
-    try:
-        scheduled_for, recurrence = _schedule_from_model(response, now)
+        plan = parse_schedule_instruction(payload.instruction)
     except ValueError as error:
         raise HTTPException(
-            status_code=422, detail=f"No pude interpretar la programación: {error}"
+            status_code=422, detail=f"No pude interpretar la programación determinista: {error}"
         ) from error
-    return _schedule_payload(scheduled_for, recurrence)
+    return _schedule_payload(plan)
 
 
 def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datetime:
@@ -403,6 +344,12 @@ def _announcement_payload(announcement: Announcement) -> dict[str, object]:
         "created_by": announcement.created_by,
         "status": announcement.status,
         "recurrence": announcement.recurrence,
+        "recurrence_weekdays": [
+            int(value) for value in announcement.recurrence_weekdays.split(",") if value
+        ],
+        "recurrence_until": (
+            announcement.recurrence_until.isoformat() if announcement.recurrence_until else None
+        ),
         "created_at": announcement.created_at.isoformat(),
         "channels": [
             {
@@ -517,12 +464,24 @@ async def _create_announcement_record(
     if any(channel_id <= 0 for channel_id in channel_ids):
         raise HTTPException(status_code=422, detail="Los IDs de canal deben ser positivos")
     scheduled_for = _future_schedule(payload.scheduled_for, default_now=True)
+    try:
+        recurrence, _, recurrence_weekdays, recurrence_until = normalize_recurrence(
+            payload.recurrence,
+            1,
+            payload.recurrence_weekdays,
+            scheduled_for,
+            _utc_datetime(payload.recurrence_until) if payload.recurrence_until else None,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     async with database.session() as session, session.begin():
         announcement = Announcement(
             content=_message_content(payload.content),
             created_by=payload.created_by,
             status="scheduled",
-            recurrence=payload.recurrence,
+            recurrence=recurrence,
+            recurrence_weekdays=",".join(str(day) for day in recurrence_weekdays),
+            recurrence_until=recurrence_until,
             attachments=attachments or [],
             channels=[
                 AnnouncementChannel(
@@ -573,15 +532,25 @@ async def create_announcement_with_attachments(
     channel_ids: str = Form(...),
     scheduled_for: str | None = Form(default=None),
     recurrence: str = Form(default="once"),
+    recurrence_weekdays: str = Form(default="[]"),
+    recurrence_until: str | None = Form(default=None),
     files: list[UploadFile] = File(default=[]),
 ) -> dict[str, object]:
     if recurrence not in RECURRENCES:
         raise HTTPException(status_code=422, detail="La repetición no es válida")
+    try:
+        raw_weekdays = json.loads(recurrence_weekdays)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="Los días deben ser una lista JSON") from error
+    if not isinstance(raw_weekdays, list):
+        raise HTTPException(status_code=422, detail="Los días deben ser una lista JSON")
     payload = AnnouncementInput(
         content=content,
         channel_ids=_form_ids(channel_ids, field_name="canales", maximum=25),
         scheduled_for=_form_datetime(scheduled_for, required=False),
         recurrence=recurrence,
+        recurrence_weekdays=raw_weekdays,
+        recurrence_until=_form_datetime(recurrence_until, required=False),
     )
     announcement_id = await _create_announcement_record(payload, await _read_attachments(files))
     return _announcement_payload(await _load_announcement(announcement_id))
@@ -623,6 +592,8 @@ async def create_reminder_with_attachments(
     role_id: int | None = Form(default=None),
     announcement_id: uuid.UUID | None = Form(default=None),
     recurrence: str = Form(default="once"),
+    recurrence_weekdays: str = Form(default="[]"),
+    recurrence_until: str | None = Form(default=None),
     files: list[UploadFile] = File(default=[]),
 ) -> dict[str, object]:
     if recurrence not in RECURRENCES:
@@ -635,6 +606,12 @@ async def create_reminder_with_attachments(
         ) from error
     if not isinstance(raw_user_ids, list) or len(raw_user_ids) > 500:
         raise HTTPException(status_code=422, detail="Indica como máximo 500 usuarios")
+    try:
+        raw_weekdays = json.loads(recurrence_weekdays)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="Los días deben ser una lista JSON") from error
+    if not isinstance(raw_weekdays, list):
+        raise HTTPException(status_code=422, detail="Los días deben ser una lista JSON")
     payload = ReminderInput(
         content=content,
         scheduled_for=_form_datetime(scheduled_for, required=True),
@@ -642,6 +619,8 @@ async def create_reminder_with_attachments(
         role_id=role_id,
         announcement_id=announcement_id,
         recurrence=recurrence,
+        recurrence_weekdays=raw_weekdays,
+        recurrence_until=_form_datetime(recurrence_until, required=False),
     )
     reminder_id = await _create_reminder_record(
         payload,

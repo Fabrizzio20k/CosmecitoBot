@@ -13,16 +13,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 
 type Attachment = { id: string; filename: string; byte_size: number };
-type SchedulePlan = { scheduled_for: string; recurrence: "once" | "daily" | "weekly" | "monthly"; summary: string };
+type SchedulePlan = { scheduled_for: string; recurrence: "once" | "daily" | "weekly" | "monthly"; recurrence_weekdays: number[]; recurrence_until: string | null; summary: string };
 type Delivery = { channel_id: number; scheduled_for: string; status: string; error: string | null };
 type Recipient = { user_id: number; status: string };
 type Reminder = { id: string; content: string; scheduled_for: string; target_role_id: number | null; status: string; recurrence: string; recipients: Recipient[]; attachments: Attachment[] };
-type Announcement = { id: string; content: string; created_at: string; status: string; recurrence: string; channels: Delivery[]; reminders: Reminder[]; attachments: Attachment[] };
+type Announcement = { id: string; content: string; created_at: string; status: string; recurrence: string; recurrence_until: string | null; channels: Delivery[]; reminders: Reminder[]; attachments: Attachment[] };
 type Processing = "loading" | "interpreting" | "saving" | null;
 
 const api = "/api";
 const recurrenceLabel: Record<string, string> = { once: "Una vez", daily: "Diario", weekly: "Semanal", monthly: "Mensual" };
-const processingLabel: Record<Exclude<Processing, null>, string> = { loading: "Actualizando actividad…", interpreting: "Interpretando la fecha con IA…", saving: "Guardando y preparando entregas…" };
+const processingLabel: Record<Exclude<Processing, null>, string> = { loading: "Actualizando actividad…", interpreting: "Validando la programación…", saving: "Guardando y preparando entregas…" };
+const scheduleFormula = "Fórmulas: 18/09/2026 a las 18:00 · mañana a las 18:00 · todos los lunes, miércoles y viernes desde el 18/09/2026 a las 6pm hasta el 30/11/2026.";
 
 function parseIds(value: string): number[] {
   const ids = [...new Set(value.split(/[,\s]+/).filter(Boolean).map(Number))];
@@ -108,7 +109,7 @@ export default function AnnouncementsPage() {
       if (announcementWhen.trim() && !announcementPlan) throw new Error("Primero interpreta la fecha y revisa la propuesta.");
       const form = new FormData();
       form.set("content", content.trim()); form.set("channel_ids", JSON.stringify(parseIds(channels)));
-      if (announcementPlan) { form.set("scheduled_for", announcementPlan.scheduled_for); form.set("recurrence", announcementPlan.recurrence); }
+      if (announcementPlan) { form.set("scheduled_for", announcementPlan.scheduled_for); form.set("recurrence", announcementPlan.recurrence); form.set("recurrence_weekdays", JSON.stringify(announcementPlan.recurrence_weekdays)); if (announcementPlan.recurrence_until) form.set("recurrence_until", announcementPlan.recurrence_until); }
       announcementFiles.forEach((file) => form.append("files", file));
       setProcessing("saving"); await request("/announcements/upload", { method: "POST", body: form });
       setContent(""); setChannels(""); setAnnouncementWhen(""); setAnnouncementPlan(null); setAnnouncementFiles([]);
@@ -126,7 +127,7 @@ export default function AnnouncementsPage() {
       if (!userIds.length && !roleId) throw new Error("Indica usuarios, un rol, o ambos.");
       if (roleId !== undefined && (!Number.isSafeInteger(roleId) || roleId <= 0)) throw new Error("El ID de rol no es válido.");
       const form = new FormData();
-      form.set("content", reminderContent.trim()); form.set("scheduled_for", reminderPlan.scheduled_for); form.set("recurrence", reminderPlan.recurrence); form.set("user_ids", JSON.stringify(userIds));
+      form.set("content", reminderContent.trim()); form.set("scheduled_for", reminderPlan.scheduled_for); form.set("recurrence", reminderPlan.recurrence); form.set("recurrence_weekdays", JSON.stringify(reminderPlan.recurrence_weekdays)); form.set("user_ids", JSON.stringify(userIds)); if (reminderPlan.recurrence_until) form.set("recurrence_until", reminderPlan.recurrence_until);
       if (roleId) form.set("role_id", String(roleId));
       reminderFiles.forEach((file) => form.append("files", file));
       setProcessing("saving"); await request("/reminders/upload", { method: "POST", body: form });
@@ -151,16 +152,18 @@ export default function AnnouncementsPage() {
         <Card className="border-border/80 bg-card/85 shadow-xl shadow-black/10"><CardHeader><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-xl bg-primary/15 text-primary"><Megaphone className="size-4" /></span><div><CardTitle className="text-base">Nuevo anuncio</CardTitle><CardDescription>Publica ahora o programa una entrega para tus canales.</CardDescription></div></div></CardHeader><Separator /><CardContent className="pt-5"><form className="grid gap-4" onSubmit={(event) => void createAnnouncement(event)}>
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Mensaje<Textarea value={content} onChange={(event) => setContent(event.target.value)} maxLength={2000} required className="min-h-28 bg-background/50" /></label>
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Canales<Textarea value={channels} onChange={(event) => setChannels(event.target.value)} placeholder="IDs separados por coma" required className="min-h-18 bg-background/50" /></label>
-          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">¿Cuándo?<Textarea value={announcementWhen} onChange={(event) => { setAnnouncementWhen(event.target.value); setAnnouncementPlan(null); }} placeholder="Ej.: próximo lunes a las 9:30, repetir cada semana" className="min-h-20 bg-background/50" /></label>
-          <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="secondary" size="sm" disabled={busy || !announcementWhen.trim()} onClick={() => void interpret(announcementWhen, setAnnouncementPlan)}>Interpretar con IA</Button>{announcementPlan && <Badge className="h-auto whitespace-normal bg-primary/15 py-1.5 text-left text-primary hover:bg-primary/15"><CheckCircle2 />{announcementPlan.summary}</Badge>}</div>
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">¿Cuándo?<Textarea value={announcementWhen} onChange={(event) => { setAnnouncementWhen(event.target.value); setAnnouncementPlan(null); }} placeholder="Ej.: todos los viernes desde el 18 de setiembre a las 6pm" className="min-h-20 bg-background/50" /></label>
+          <p className="rounded-xl border border-primary/25 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">{scheduleFormula}</p>
+          <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="secondary" size="sm" disabled={busy || !announcementWhen.trim()} onClick={() => void interpret(announcementWhen, setAnnouncementPlan)}>Validar fecha</Button>{announcementPlan && <Badge className="h-auto whitespace-normal bg-primary/15 py-1.5 text-left text-primary hover:bg-primary/15"><CheckCircle2 />{announcementPlan.summary}</Badge>}</div>
           <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border bg-muted/25 px-3 py-2.5 text-sm text-muted-foreground hover:bg-muted/50"><FileUp className="size-4" /><span className="truncate">{announcementFiles.length ? announcementFiles.map((file) => file.name).join(", ") : "Adjuntar archivos (opcional)"}</span><input className="sr-only" type="file" multiple onChange={(event) => setAnnouncementFiles(Array.from(event.target.files ?? []))} /></label>
           <Button type="submit" disabled={busy}><Send />{announcementPlan ? "Confirmar y programar" : "Publicar ahora"}</Button>
         </form></CardContent></Card>
 
         <Card className="border-border/80 bg-card/85 shadow-xl shadow-black/10"><CardHeader><div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-xl bg-primary/15 text-primary"><BellRing className="size-4" /></span><div><CardTitle className="text-base">Nuevo recordatorio</CardTitle><CardDescription>Envía un DM a usuarios o a los miembros de un rol.</CardDescription></div></div></CardHeader><Separator /><CardContent className="pt-5"><form className="grid gap-4" onSubmit={(event) => void createReminder(event)}>
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Mensaje<Textarea value={reminderContent} onChange={(event) => setReminderContent(event.target.value)} maxLength={2000} required className="min-h-28 bg-background/50" /></label>
-          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">¿Cuándo?<Textarea value={reminderWhen} onChange={(event) => { setReminderWhen(event.target.value); setReminderPlan(null); }} placeholder="Ej.: mañana a las 18:00; todos los días" required className="min-h-20 bg-background/50" /></label>
-          <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="secondary" size="sm" disabled={busy || !reminderWhen.trim()} onClick={() => void interpret(reminderWhen, setReminderPlan)}>Interpretar con IA</Button>{reminderPlan && <Badge className="h-auto whitespace-normal bg-primary/15 py-1.5 text-left text-primary hover:bg-primary/15"><CheckCircle2 />{reminderPlan.summary}</Badge>}</div>
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">¿Cuándo?<Textarea value={reminderWhen} onChange={(event) => { setReminderWhen(event.target.value); setReminderPlan(null); }} placeholder="Ej.: todos los viernes desde el 18 de setiembre a las 6pm hasta el 30 de noviembre" required className="min-h-20 bg-background/50" /></label>
+          <p className="rounded-xl border border-primary/25 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">{scheduleFormula}</p>
+          <div className="flex flex-wrap items-center gap-2"><Button type="button" variant="secondary" size="sm" disabled={busy || !reminderWhen.trim()} onClick={() => void interpret(reminderWhen, setReminderPlan)}>Validar fecha</Button>{reminderPlan && <Badge className="h-auto whitespace-normal bg-primary/15 py-1.5 text-left text-primary hover:bg-primary/15"><CheckCircle2 />{reminderPlan.summary}</Badge>}</div>
           <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Usuarios<Input value={users} onChange={(event) => setUsers(event.target.value)} placeholder="IDs separados por coma" /></label><label className="grid gap-1.5 text-xs font-medium text-muted-foreground">Rol<Input value={role} onChange={(event) => setRole(event.target.value)} placeholder="ID opcional" /></label></div>
           <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border bg-muted/25 px-3 py-2.5 text-sm text-muted-foreground hover:bg-muted/50"><FileUp className="size-4" /><span className="truncate">{reminderFiles.length ? reminderFiles.map((file) => file.name).join(", ") : "Adjuntar archivos (opcional)"}</span><input className="sr-only" type="file" multiple onChange={(event) => setReminderFiles(Array.from(event.target.files ?? []))} /></label>
           <Button type="submit" disabled={busy}><Send />Confirmar y programar</Button>

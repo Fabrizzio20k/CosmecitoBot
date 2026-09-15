@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import json
 import re
 import uuid
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import selectinload
 
@@ -26,6 +24,7 @@ from cosmecito_db.reminder_recurrence import (
     next_occurrence as next_reminder_occurrence,
     normalize_recurrence,
 )
+from cosmecito_db.schedule_parser import Schedule, parse_schedule
 from cosmecito_db.scheduling import next_occurrence as next_announcement_occurrence
 
 
@@ -40,11 +39,6 @@ class AnnouncementCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.sessions = bot.database.sessions
-        self.scheduler_client = AsyncOpenAI(
-            base_url=bot.settings.llama_cpp_base_url,
-            api_key="local-llama-cpp",
-            timeout=bot.settings.llama_cpp_timeout_seconds,
-        )
         self.delivery_loop.start()
 
     def cog_unload(self) -> None:
@@ -59,12 +53,41 @@ class AnnouncementCog(commands.Cog):
     async def wait_until_ready(self) -> None:
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="anuncio", description="Interpreta y programa un anuncio")
+    @app_commands.command(name="ayuda", description="Guía de anuncios y recordatorios programados")
+    async def message_help(self, interaction: discord.Interaction) -> None:
+        embed = discord.Embed(
+            title="Ayuda · anuncios y recordatorios",
+            description="Todas las fechas se validan de forma determinista en hora Lima antes de confirmar.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="Anuncio",
+            value="`/anuncio` pide canal, mensaje, fecha opcional y un archivo opcional.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Recordatorio privado",
+            value="`/recordatorio` recibe destinatarios combinados, mensaje, fecha y archivo. Usa `@rol @persona yo` para incluir rol, personas y a ti.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Programación",
+            value=(
+                "Una vez: `18/09/2026 a las 18:00` o `mañana a las 18:00`\n"
+                "Repetición: `todos los lunes, miércoles y viernes desde el 18/09/2026 a las 6pm`\n"
+                "Con límite: agrega `hasta el 30/11/2026`"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Después verás la fecha, los días y el límite interpretados antes de confirmar.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="anuncio", description="Programa un anuncio con fecha validada")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         canal="Canal donde se publicará el anuncio",
         mensaje="Texto del anuncio",
-        fecha="Opcional. Ej.: 'mañana 18:30' o 'cada lunes a las 09:00' (hora Lima)",
+        fecha="Ej.: 18/09/2026 a las 18:00; todos los viernes desde 18/09 a las 6pm",
         archivo="Archivo opcional que se enviará con el anuncio",
     )
     async def create_announcement(
@@ -87,40 +110,55 @@ class AnnouncementCog(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            scheduled_for, recurrence = (
+            schedule = (
                 await self._interpret_schedule(fecha)
-                if fecha else (datetime.now(UTC), "once")
+                if fecha else Schedule(datetime.now(UTC), "once")
+            )
+            scheduled_for, recurrence, recurrence_until, recurrence_weekdays = (
+                schedule.scheduled_for,
+                schedule.recurrence,
+                schedule.recurrence_until,
+                schedule.recurrence_weekdays,
             )
         except ValueError as error:
             await interaction.edit_original_response(content=str(error))
             return
 
-        async def persist() -> str:
+        async def persist(
+            final_scheduled_for: datetime,
+            final_recurrence: str,
+            final_until: datetime | None,
+            final_weekdays: tuple[int, ...],
+        ) -> str:
             announcement = await self._create_announcement(
                 content=mensaje.strip(),
                 channel_ids=[canal.id],
-                scheduled_for=scheduled_for,
+                scheduled_for=final_scheduled_for,
                 created_by=interaction.user.id,
-                recurrence=recurrence,
+                recurrence=final_recurrence,
+                recurrence_weekdays=final_weekdays,
+                recurrence_until=final_until,
                 attachments=await self._attachments_from_discord(archivo),
             )
-            return f"Anuncio `{announcement.id}` confirmado para {self._format_lima(scheduled_for)}."
+            return f"Anuncio `{announcement.id}` confirmado para {self._format_lima(final_scheduled_for)}."
 
         await self._request_confirmation(
             interaction,
             title=f"Anuncio en #{canal.name}",
             scheduled_for=scheduled_for,
             recurrence=recurrence,
+            recurrence_weekdays=recurrence_weekdays,
+            recurrence_until=recurrence_until,
             schedule_text=fecha,
             persist=persist,
         )
 
-    @app_commands.command(name="recordatorio", description="Interpreta y programa un recordatorio privado")
+    @app_commands.command(name="recordatorio", description="Programa un recordatorio privado con fecha validada")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         destinatarios="Menciona personas, un rol y/o escribe 'yo': @persona @rol yo",
         mensaje="Texto que se enviará por mensaje privado",
-        fecha="Opcional. Ej.: 'mañana 18:30' o 'todos los días a las 09:00' (hora Lima)",
+        fecha="Ej.: mañana a las 18:30; todos los viernes desde 18/09 a las 6pm hasta 30/11",
         archivo="Archivo opcional que se enviará por DM",
     )
     async def create_reminder(
@@ -146,37 +184,48 @@ class AnnouncementCog(commands.Cog):
             user_ids, role_id, recipient_label = self._parse_combined_recipients(
                 destinatarios, interaction.user.id, interaction.guild
             )
-            scheduled_for, recurrence = (
+            schedule = (
                 await self._interpret_schedule(fecha)
-                if fecha else (datetime.now(UTC), "once")
+                if fecha else Schedule(datetime.now(UTC), "once")
             )
+            scheduled_for, recurrence = schedule.scheduled_for, schedule.recurrence
             recurrence, interval, weekdays, until = normalize_recurrence(
-                recurrence, 1, (), scheduled_for, None
+                recurrence, 1, schedule.recurrence_weekdays, scheduled_for, schedule.recurrence_until
             )
         except ValueError as error:
             await interaction.edit_original_response(content=str(error))
             return
 
-        async def persist() -> str:
+        async def persist(
+            final_scheduled_for: datetime,
+            final_recurrence: str,
+            final_until: datetime | None,
+            final_weekdays: tuple[int, ...],
+        ) -> str:
+            normalized_recurrence, interval, weekdays, normalized_until = normalize_recurrence(
+                final_recurrence, 1, final_weekdays, final_scheduled_for, final_until
+            )
             reminder = await self._create_reminder(
                 announcement_id=None,
                 content=mensaje.strip(),
-                scheduled_for=scheduled_for,
+                scheduled_for=final_scheduled_for,
                 user_ids=user_ids,
                 role_id=role_id,
-                recurrence=recurrence,
+                recurrence=normalized_recurrence,
                 recurrence_interval=interval,
                 recurrence_weekdays=weekdays,
-                recurrence_until=until,
+                recurrence_until=normalized_until,
                 attachments=await self._attachments_from_discord(archivo),
             )
-            return f"Recordatorio `{reminder.id}` confirmado para {self._format_lima(scheduled_for)}."
+            return f"Recordatorio `{reminder.id}` confirmado para {self._format_lima(final_scheduled_for)}."
 
         await self._request_confirmation(
             interaction,
             title=f"Recordatorio privado para {recipient_label}",
             scheduled_for=scheduled_for,
             recurrence=recurrence,
+            recurrence_weekdays=weekdays,
+            recurrence_until=until,
             schedule_text=fecha,
             persist=persist,
         )
@@ -189,6 +238,8 @@ class AnnouncementCog(commands.Cog):
         scheduled_for: datetime,
         created_by: int | None,
         recurrence: str = "once",
+        recurrence_weekdays: tuple[int, ...] = (),
+        recurrence_until: datetime | None = None,
         attachments: list[MessageAttachment] | None = None,
     ) -> Announcement:
         async with self.sessions() as session, session.begin():
@@ -197,6 +248,8 @@ class AnnouncementCog(commands.Cog):
                 created_by=created_by,
                 status="scheduled",
                 recurrence=recurrence,
+                recurrence_weekdays=",".join(str(day) for day in recurrence_weekdays),
+                recurrence_until=recurrence_until,
                 attachments=attachments or [],
             )
             announcement.channels = [
@@ -249,55 +302,9 @@ class AnnouncementCog(commands.Cog):
             session.add(reminder)
         return reminder
 
-    async def _interpret_schedule(self, instruction: str) -> tuple[datetime, str]:
-        now = datetime.now(UTC)
-        prompt = """Interpreta una instrucción de fecha en español para America/Lima.
-Devuelve exclusivamente JSON: {"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"once|daily|weekly|monthly"}.
-Usa once si no hay repetición. No inventes una fecha u hora si la instrucción es ambigua."""
-        try:
-            completion = await self.scheduler_client.chat.completions.create(
-                model=self.bot.settings.llama_cpp_model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "now_lima": now.astimezone(self.lima_timezone).strftime("%Y-%m-%d %H:%M"),
-                                "instruction": instruction.strip(),
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                temperature=0,
-                max_tokens=120,
-            )
-        except (APITimeoutError, APIConnectionError, APIStatusError) as error:
-            raise ValueError("No se pudo consultar el modelo para interpretar la fecha.") from error
-        match = re.search(r"\{.*\}", (completion.choices[0].message.content or "").strip(), re.DOTALL)
-        if match is None:
-            raise ValueError("No pude interpretar fecha, hora y repetición. Corrige el texto e inténtalo otra vez.")
-        try:
-            result = json.loads(match.group())
-            if not (
-                isinstance(result.get("date"), str)
-                and isinstance(result.get("time"), str)
-                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["date"])
-                and re.fullmatch(r"\d{2}:\d{2}", result["time"])
-            ):
-                raise ValueError
-            scheduled_for = datetime.combine(
-                date.fromisoformat(result["date"]),
-                time.fromisoformat(result["time"]),
-                tzinfo=self.lima_timezone,
-            ).astimezone(UTC)
-            recurrence = result["recurrence"]
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise ValueError("La interpretación del modelo no es válida. Corrige el texto e inténtalo otra vez.") from error
-        if recurrence not in {"once", "daily", "weekly", "monthly"} or scheduled_for <= now:
-            raise ValueError("La fecha debe ser futura y la repetición debe ser una vez, diaria, semanal o mensual.")
-        return scheduled_for, recurrence
+    async def _interpret_schedule(self, instruction: str) -> Schedule:
+        """Interpreta la gramática documentada sin llamar a un modelo."""
+        return parse_schedule(instruction)
 
     async def _attachments_from_discord(
         self, attachment: discord.Attachment | None
@@ -371,6 +378,8 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
         title: str,
         scheduled_for: datetime,
         recurrence: str,
+        recurrence_weekdays: tuple[int, ...],
+        recurrence_until: datetime | None,
         schedule_text: str | None,
         persist,
     ) -> None:
@@ -378,8 +387,9 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
             return (
                 f"**{title}**\n"
                 f"Interpreté: **{self._format_lima(scheduled_for)}** · "
-                f"**{self._recurrence_label(recurrence)}**.\n"
-                "Confirma para guardarlo o elige **Corregir texto** para cambiar "
+                f"**{self._recurrence_label(recurrence, recurrence_weekdays)}**.\n"
+                + (f"Finaliza: **{self._format_lima(recurrence_until)}**.\n" if recurrence_until else "")
+                + "Confirma para guardarlo o elige **Corregir texto** para cambiar "
                 "la fecha o la repetición."
             )
 
@@ -392,7 +402,9 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
                 await button_interaction.response.send_message("Sólo quien creó la solicitud puede confirmarla.", ephemeral=True)
                 return
             try:
-                result = await persist()
+                result = await persist(
+                    scheduled_for, recurrence, recurrence_until, recurrence_weekdays
+                )
             except (ValueError, discord.DiscordException) as error:
                 await button_interaction.response.edit_message(content=f"No se pudo guardar: {error}", view=None)
                 return
@@ -405,19 +417,20 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
 
             class CorrectScheduleModal(discord.ui.Modal, title="Corregir programación"):
                 instruction = discord.ui.TextInput(
-                    label="Fecha y repetición en lenguaje natural",
-                    placeholder="Ej.: mañana 18:30 o cada lunes a las 09:00",
+                    label="Programación (fecha y repetición)",
+                    placeholder="Ej.: 18/09/2026 a las 18:00",
                     default=schedule_text or "",
                     required=True,
                     max_length=300,
                 )
 
                 async def on_submit(self, modal_interaction: discord.Interaction) -> None:
-                    nonlocal scheduled_for, recurrence
+                    nonlocal scheduled_for, recurrence, recurrence_weekdays, recurrence_until
                     try:
-                        scheduled_for, recurrence = await self_cog._interpret_schedule(
-                            str(self.instruction.value)
-                        )
+                        corrected = await self_cog._interpret_schedule(str(self.instruction.value))
+                        scheduled_for, recurrence = corrected.scheduled_for, corrected.recurrence
+                        recurrence_weekdays = corrected.recurrence_weekdays
+                        recurrence_until = corrected.recurrence_until
                     except ValueError as error:
                         await modal_interaction.response.send_message(str(error), ephemeral=True)
                         return
@@ -540,9 +553,21 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
                     and announcement.recurrence_scheduled_at is None
                 ):
                     next_scheduled_for = next_announcement_occurrence(
-                        record.scheduled_for, announcement.recurrence
+                        record.scheduled_for,
+                        announcement.recurrence,
+                        tuple(
+                            int(day)
+                            for day in announcement.recurrence_weekdays.split(",")
+                            if day
+                        ),
                     )
-                    if next_scheduled_for is not None:
+                    if (
+                        next_scheduled_for is not None
+                        and (
+                            announcement.recurrence_until is None
+                            or next_scheduled_for <= announcement.recurrence_until
+                        )
+                    ):
                         announcement.recurrence_scheduled_at = next_scheduled_for
                         session.add(
                             Announcement(
@@ -550,6 +575,8 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
                                 created_by=announcement.created_by,
                                 status="scheduled",
                                 recurrence=announcement.recurrence,
+                                recurrence_weekdays=announcement.recurrence_weekdays,
+                                recurrence_until=announcement.recurrence_until,
                                 channels=[
                                     AnnouncementChannel(
                                         channel_id=channel.channel_id,
@@ -838,9 +865,12 @@ Usa once si no hay repetición. No inventes una fecha u hora si la instrucción 
             raise ValueError("Usa días separados por coma, por ejemplo: lun, mie, vie.") from error
 
     @staticmethod
-    def _recurrence_label(recurrence: str) -> str:
+    def _recurrence_label(recurrence: str, weekdays: tuple[int, ...] = ()) -> str:
         labels = {"once": "una vez", "daily": "diario", "weekly": "semanal", "monthly": "mensual"}
-        return labels[recurrence]
+        if recurrence != "weekly" or not weekdays:
+            return labels[recurrence]
+        day_labels = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+        return "semanal: " + ", ".join(day_labels[day] for day in weekdays)
 
     @staticmethod
     def _parse_lima_datetime(value: str | None, *, required: bool = False) -> datetime:
