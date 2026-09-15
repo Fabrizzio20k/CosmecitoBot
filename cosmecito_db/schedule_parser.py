@@ -17,7 +17,7 @@ MONTHS = {
 }
 WEEKDAYS = {
     "lunes": 0, "martes": 1, "miercoles": 2, "jueves": 3,
-    "viernes": 4, "sabado": 5, "domingo": 6,
+    "viernes": 4, "sabado": 5, "sabados": 5, "domingo": 6, "domingos": 6,
 }
 DATE_WORDS = "|".join(MONTHS)
 DATE_PATTERN = re.compile(
