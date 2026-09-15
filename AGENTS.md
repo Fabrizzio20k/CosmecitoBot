@@ -137,8 +137,10 @@ empaquetar antes ese módulo.
    `announcement_channels`.
 2. El bot consulta cada 20 segundos entregas pendientes, las reclama con
    `FOR UPDATE SKIP LOCKED`, publica en Discord y registra `sent` o `failed`.
-3. La UI o `/recordatorio` crea un `Reminder` independiente con uno o varios
-   usuarios y/o un ID de rol; el anuncio relacionado es opcional.
+3. La UI crea un `Reminder` independiente con uno o varios usuarios y/o un ID
+   de rol; el anuncio relacionado es opcional. El comando `/recordatorio`
+   también acepta destinatarios combinados en una sola opción: menciones de
+   personas, una mención de rol y/o `yo`.
 4. Al vencer la fecha, el bot materializa miembros del rol, manda DM a cada
    destinatario y conserva estado, intento, fecha y error individual. Las
    recurrencias diaria, semanal o mensual crean una nueva entrega auditable al
@@ -164,7 +166,12 @@ Rutas administrativas relevantes:
 | `DELETE` | `/reminders/{id}` | Cancela un recordatorio pendiente. |
 | `DELETE` | `/announcements/{id}` | Cancela entregas y recordatorios aún pendientes. |
 
-Los comandos Discord exigen `Manage Guild`. Para los destinatarios por rol,
+Los comandos Discord exigen `Manage Guild`. `/anuncio` expone canal, mensaje,
+fecha natural opcional y archivo; `/recordatorio` expone destinatarios
+combinados, mensaje, fecha natural opcional y archivo. El modelo muestra la
+fecha/hora normalizada y la recurrencia antes de persistir, con botones de
+confirmar o corregir. Discord permite un adjunto por slash command; para varios
+se usa un ZIP o la UI. Para los destinatarios por rol,
 mantén activado **Server Members Intent** en el portal de Discord y en el bot;
 sin él no se puede expandir el rol de forma fiable. Los usuarios pueden cerrar
 sus DM: eso es una entrega fallida esperada y debe mostrarse, no ocultarse.

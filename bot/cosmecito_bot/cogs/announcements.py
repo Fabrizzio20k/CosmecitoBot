@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
+import re
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import selectinload
 
@@ -30,12 +33,18 @@ class AnnouncementCog(commands.Cog):
     """Publica anuncios de canal y recordatorios privados persistidos."""
 
     max_content_length = 2_000
+    max_attachment_bytes = 8 * 1024 * 1024
     stale_claim_after = timedelta(minutes=5)
     lima_timezone = LIMA_TIMEZONE
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.sessions = bot.database.sessions
+        self.scheduler_client = AsyncOpenAI(
+            base_url=bot.settings.llama_cpp_base_url,
+            api_key="local-llama-cpp",
+            timeout=bot.settings.llama_cpp_timeout_seconds,
+        )
         self.delivery_loop.start()
 
     def cog_unload(self) -> None:
@@ -50,12 +59,13 @@ class AnnouncementCog(commands.Cog):
     async def wait_until_ready(self) -> None:
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="anuncio", description="Programa un anuncio para un canal")
+    @app_commands.command(name="anuncio", description="Interpreta y programa un anuncio")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         canal="Canal donde se publicará el anuncio",
         mensaje="Texto del anuncio",
-        fecha="Opcional en hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'",
+        fecha="Opcional. Ej.: 'mañana 18:30' o 'cada lunes a las 09:00' (hora Lima)",
+        archivo="Archivo opcional que se enviará con el anuncio",
     )
     async def create_announcement(
         self,
@@ -63,6 +73,7 @@ class AnnouncementCog(commands.Cog):
         canal: discord.TextChannel,
         mensaje: str,
         fecha: str | None = None,
+        archivo: discord.Attachment | None = None,
     ) -> None:
         if not self._can_manage(interaction):
             await interaction.response.send_message(
@@ -74,67 +85,55 @@ class AnnouncementCog(commands.Cog):
                 "El mensaje debe tener entre 1 y 2000 caracteres.", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            scheduled_for = self._parse_lima_datetime(fecha)
+            scheduled_for, recurrence = (
+                await self._interpret_schedule(fecha)
+                if fecha else (datetime.now(UTC), "once")
+            )
         except ValueError as error:
-            await interaction.response.send_message(str(error), ephemeral=True)
+            await interaction.edit_original_response(content=str(error))
             return
 
-        announcement = await self._create_announcement(
-            content=mensaje.strip(),
-            channel_ids=[canal.id],
-            scheduled_for=scheduled_for,
-            created_by=interaction.user.id,
-        )
-        await interaction.response.send_message(
-            f"Anuncio `{announcement.id}` programado para {self._format_lima(scheduled_for)}.",
-            ephemeral=True,
-        )
-        if scheduled_for <= datetime.now(UTC):
-            await self._dispatch_announcements()
+        async def persist() -> str:
+            announcement = await self._create_announcement(
+                content=mensaje.strip(),
+                channel_ids=[canal.id],
+                scheduled_for=scheduled_for,
+                created_by=interaction.user.id,
+                recurrence=recurrence,
+                attachments=await self._attachments_from_discord(archivo),
+            )
+            return f"Anuncio `{announcement.id}` confirmado para {self._format_lima(scheduled_for)}."
 
-    @app_commands.command(name="recordatorio", description="Programa un recordatorio privado")
+        await self._request_confirmation(
+            interaction,
+            title=f"Anuncio en #{canal.name}",
+            scheduled_for=scheduled_for,
+            recurrence=recurrence,
+            schedule_text=fecha,
+            persist=persist,
+        )
+
+    @app_commands.command(name="recordatorio", description="Interpreta y programa un recordatorio privado")
     @app_commands.default_permissions(manage_guild=True)
-    @app_commands.choices(
-        repetir=[
-            app_commands.Choice(name="Una vez", value="once"),
-            app_commands.Choice(name="Cada día", value="daily"),
-            app_commands.Choice(name="Semanal", value="weekly"),
-            app_commands.Choice(name="Mensual", value="monthly"),
-        ]
-    )
     @app_commands.describe(
+        destinatarios="Menciona personas, un rol y/o escribe 'yo': @persona @rol yo",
         mensaje="Texto que se enviará por mensaje privado",
-        fecha="Hora Lima: 'hoy 18:30', 'mañana 09:00' o '15/09 14:00'",
-        usuario="Destinatario individual (alternativa al rol)",
-        rol="Destinatarios pertenecientes a este rol (alternativa al usuario)",
-        anuncio_id="Opcional: ID del anuncio relacionado",
-        repetir="Frecuencia del recordatorio",
-        cada="Cada cuántos días o meses (sólo diaria o mensual)",
-        dias_semana="Sólo semanal: lun, mie, vie",
-        hasta="Fin opcional, en hora Lima; por ejemplo '30/09 18:30'",
+        fecha="Opcional. Ej.: 'mañana 18:30' o 'todos los días a las 09:00' (hora Lima)",
+        archivo="Archivo opcional que se enviará por DM",
     )
     async def create_reminder(
         self,
         interaction: discord.Interaction,
+        destinatarios: str,
         mensaje: str,
-        fecha: str,
-        usuario: discord.Member | None = None,
-        rol: discord.Role | None = None,
-        anuncio_id: str | None = None,
-        repetir: app_commands.Choice[str] | None = None,
-        cada: app_commands.Range[int, 1, 365] = 1,
-        dias_semana: str | None = None,
-        hasta: str | None = None,
+        fecha: str | None = None,
+        archivo: discord.Attachment | None = None,
     ) -> None:
         if not self._can_manage(interaction):
             await interaction.response.send_message(
                 "Necesitas el permiso Gestionar servidor.", ephemeral=True
-            )
-            return
-        if bool(usuario) == bool(rol):
-            await interaction.response.send_message(
-                "Indica exactamente un usuario o un rol.", ephemeral=True
             )
             return
         if not mensaje.strip() or len(mensaje) > self.max_content_length:
@@ -142,39 +141,44 @@ class AnnouncementCog(commands.Cog):
                 "El mensaje debe tener entre 1 y 2000 caracteres.", ephemeral=True
             )
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            announcement_id = uuid.UUID(anuncio_id) if anuncio_id else None
-            scheduled_for = self._parse_lima_datetime(fecha, required=True)
-            recurrence, recurrence_interval, recurrence_weekdays, recurrence_until = (
-                normalize_recurrence(
-                    repetir.value if repetir else "once",
-                    cada,
-                    self._parse_weekdays(dias_semana),
-                    scheduled_for,
-                    self._parse_lima_datetime(hasta, required=True) if hasta else None,
-                )
+            user_ids, role_id, recipient_label = self._parse_combined_recipients(
+                destinatarios, interaction.user.id, interaction.guild
+            )
+            scheduled_for, recurrence = (
+                await self._interpret_schedule(fecha)
+                if fecha else (datetime.now(UTC), "once")
+            )
+            recurrence, interval, weekdays, until = normalize_recurrence(
+                recurrence, 1, (), scheduled_for, None
             )
         except ValueError as error:
-            await interaction.response.send_message(str(error), ephemeral=True)
+            await interaction.edit_original_response(content=str(error))
             return
 
-        reminder = await self._create_reminder(
-            announcement_id=announcement_id,
-            content=mensaje.strip(),
+        async def persist() -> str:
+            reminder = await self._create_reminder(
+                announcement_id=None,
+                content=mensaje.strip(),
+                scheduled_for=scheduled_for,
+                user_ids=user_ids,
+                role_id=role_id,
+                recurrence=recurrence,
+                recurrence_interval=interval,
+                recurrence_weekdays=weekdays,
+                recurrence_until=until,
+                attachments=await self._attachments_from_discord(archivo),
+            )
+            return f"Recordatorio `{reminder.id}` confirmado para {self._format_lima(scheduled_for)}."
+
+        await self._request_confirmation(
+            interaction,
+            title=f"Recordatorio privado para {recipient_label}",
             scheduled_for=scheduled_for,
-            user_ids=[usuario.id] if usuario else [],
-            role_id=rol.id if rol else None,
             recurrence=recurrence,
-            recurrence_interval=recurrence_interval,
-            recurrence_weekdays=recurrence_weekdays,
-            recurrence_until=recurrence_until,
-        )
-        if reminder is None:
-            await interaction.response.send_message("No existe ese anuncio.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            f"Recordatorio `{reminder.id}` programado para {self._format_lima(scheduled_for)} ({self._recurrence_label(recurrence)}).",
-            ephemeral=True,
+            schedule_text=fecha,
+            persist=persist,
         )
 
     async def _create_announcement(
@@ -184,9 +188,17 @@ class AnnouncementCog(commands.Cog):
         channel_ids: list[int],
         scheduled_for: datetime,
         created_by: int | None,
+        recurrence: str = "once",
+        attachments: list[MessageAttachment] | None = None,
     ) -> Announcement:
         async with self.sessions() as session, session.begin():
-            announcement = Announcement(content=content, created_by=created_by, status="scheduled")
+            announcement = Announcement(
+                content=content,
+                created_by=created_by,
+                status="scheduled",
+                recurrence=recurrence,
+                attachments=attachments or [],
+            )
             announcement.channels = [
                 AnnouncementChannel(
                     channel_id=channel_id, scheduled_for=scheduled_for, status="queued"
@@ -208,6 +220,7 @@ class AnnouncementCog(commands.Cog):
         recurrence_interval: int,
         recurrence_weekdays: tuple[int, ...],
         recurrence_until: datetime | None,
+        attachments: list[MessageAttachment] | None = None,
     ) -> Reminder | None:
         async with self.sessions() as session, session.begin():
             if announcement_id is not None:
@@ -232,8 +245,197 @@ class AnnouncementCog(commands.Cog):
                 ReminderRecipient(user_id=user_id, source="direct", status="queued")
                 for user_id in set(user_ids)
             ]
+            reminder.attachments = attachments or []
             session.add(reminder)
         return reminder
+
+    async def _interpret_schedule(self, instruction: str) -> tuple[datetime, str]:
+        now = datetime.now(UTC)
+        prompt = """Interpreta una instrucción de fecha en español para America/Lima.
+Devuelve exclusivamente JSON: {"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"once|daily|weekly|monthly"}.
+Usa once si no hay repetición. No inventes una fecha u hora si la instrucción es ambigua."""
+        try:
+            completion = await self.scheduler_client.chat.completions.create(
+                model=self.bot.settings.llama_cpp_model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "now_lima": now.astimezone(self.lima_timezone).strftime("%Y-%m-%d %H:%M"),
+                                "instruction": instruction.strip(),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                temperature=0,
+                max_tokens=120,
+            )
+        except (APITimeoutError, APIConnectionError, APIStatusError) as error:
+            raise ValueError("No se pudo consultar el modelo para interpretar la fecha.") from error
+        match = re.search(r"\{.*\}", (completion.choices[0].message.content or "").strip(), re.DOTALL)
+        if match is None:
+            raise ValueError("No pude interpretar fecha, hora y repetición. Corrige el texto e inténtalo otra vez.")
+        try:
+            result = json.loads(match.group())
+            if not (
+                isinstance(result.get("date"), str)
+                and isinstance(result.get("time"), str)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["date"])
+                and re.fullmatch(r"\d{2}:\d{2}", result["time"])
+            ):
+                raise ValueError
+            scheduled_for = datetime.combine(
+                date.fromisoformat(result["date"]),
+                time.fromisoformat(result["time"]),
+                tzinfo=self.lima_timezone,
+            ).astimezone(UTC)
+            recurrence = result["recurrence"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("La interpretación del modelo no es válida. Corrige el texto e inténtalo otra vez.") from error
+        if recurrence not in {"once", "daily", "weekly", "monthly"} or scheduled_for <= now:
+            raise ValueError("La fecha debe ser futura y la repetición debe ser una vez, diaria, semanal o mensual.")
+        return scheduled_for, recurrence
+
+    async def _attachments_from_discord(
+        self, attachment: discord.Attachment | None
+    ) -> list[MessageAttachment]:
+        if attachment is None:
+            return []
+        if attachment.size > self.max_attachment_bytes:
+            raise ValueError("El archivo supera el límite de 8 MiB.")
+        data = await attachment.read()
+        return [
+            MessageAttachment(
+                filename=attachment.filename[:255],
+                content_type=attachment.content_type,
+                byte_size=len(data),
+                data=data,
+            )
+        ]
+
+    @staticmethod
+    def _parse_combined_recipients(
+        value: str, caller_id: int, guild: discord.Guild | None
+    ) -> tuple[list[int], int | None, str]:
+        """Parsea menciones Discord, nombres simples y la palabra `yo`."""
+        user_ids = {int(match) for match in re.findall(r"<@!?(\d+)>", value)}
+        role_ids = {int(match) for match in re.findall(r"<@&(\d+)>", value)}
+        unresolved: list[str] = []
+        if guild is not None:
+            for raw_name in re.findall(r"(?<!<)@([^\s,@]+)", value):
+                name = raw_name.rstrip(".,;:").casefold()
+                matching_roles = [role for role in guild.roles if role.name.casefold() == name]
+                matching_members = [
+                    member
+                    for member in guild.members
+                    if name
+                    in {
+                        member.name.casefold(),
+                        member.display_name.casefold(),
+                        (member.global_name or "").casefold(),
+                    }
+                ]
+                if len(matching_roles) + len(matching_members) == 1:
+                    if matching_roles:
+                        role_ids.add(matching_roles[0].id)
+                    else:
+                        user_ids.add(matching_members[0].id)
+                elif name:
+                    unresolved.append(f"@{raw_name}")
+        normalized = value.casefold()
+        if re.search(r"(?:^|[\s,])(?:yo|mí|mi)(?:$|[\s,])", normalized):
+            user_ids.add(caller_id)
+        if unresolved:
+            raise ValueError(
+                "No pude identificar " + ", ".join(unresolved) + ". "
+                "Usa una mención real o un nombre único del servidor."
+            )
+        if len(role_ids) > 1:
+            raise ValueError("Usa como máximo un rol por recordatorio; puedes combinarlo con varias personas.")
+        if not user_ids and not role_ids:
+            raise ValueError("Menciona al menos una persona, un rol o escribe 'yo'.")
+        labels: list[str] = []
+        if user_ids:
+            labels.append(f"{len(user_ids)} persona{'s' if len(user_ids) != 1 else ''}")
+        if role_ids:
+            labels.append("un rol")
+        return sorted(user_ids), next(iter(role_ids), None), " y ".join(labels)
+
+    async def _request_confirmation(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str,
+        scheduled_for: datetime,
+        recurrence: str,
+        schedule_text: str | None,
+        persist,
+    ) -> None:
+        def preview() -> str:
+            return (
+                f"**{title}**\n"
+                f"Interpreté: **{self._format_lima(scheduled_for)}** · "
+                f"**{self._recurrence_label(recurrence)}**.\n"
+                "Confirma para guardarlo o elige **Corregir texto** para cambiar "
+                "la fecha o la repetición."
+            )
+
+        view = discord.ui.View(timeout=180)
+        confirm = discord.ui.Button(label="Confirmar", style=discord.ButtonStyle.success)
+        cancel = discord.ui.Button(label="Corregir texto", style=discord.ButtonStyle.secondary)
+
+        async def confirm_callback(button_interaction: discord.Interaction) -> None:
+            if button_interaction.user.id != interaction.user.id:
+                await button_interaction.response.send_message("Sólo quien creó la solicitud puede confirmarla.", ephemeral=True)
+                return
+            try:
+                result = await persist()
+            except (ValueError, discord.DiscordException) as error:
+                await button_interaction.response.edit_message(content=f"No se pudo guardar: {error}", view=None)
+                return
+            await button_interaction.response.edit_message(content=f"✅ {result}", view=None)
+
+        async def cancel_callback(button_interaction: discord.Interaction) -> None:
+            if button_interaction.user.id != interaction.user.id:
+                await button_interaction.response.send_message("Sólo quien creó la solicitud puede corregirla.", ephemeral=True)
+                return
+
+            class CorrectScheduleModal(discord.ui.Modal, title="Corregir programación"):
+                instruction = discord.ui.TextInput(
+                    label="Fecha y repetición en lenguaje natural",
+                    placeholder="Ej.: mañana 18:30 o cada lunes a las 09:00",
+                    default=schedule_text or "",
+                    required=True,
+                    max_length=300,
+                )
+
+                async def on_submit(self, modal_interaction: discord.Interaction) -> None:
+                    nonlocal scheduled_for, recurrence
+                    try:
+                        scheduled_for, recurrence = await self_cog._interpret_schedule(
+                            str(self.instruction.value)
+                        )
+                    except ValueError as error:
+                        await modal_interaction.response.send_message(str(error), ephemeral=True)
+                        return
+                    await modal_interaction.response.defer(ephemeral=True)
+                    await interaction.edit_original_response(content=preview(), view=view)
+                    await modal_interaction.followup.send(
+                        "Interpretación actualizada. Revísala y confirma cuando esté correcta.",
+                        ephemeral=True,
+                    )
+
+            self_cog = self
+            await button_interaction.response.send_modal(CorrectScheduleModal())
+
+        confirm.callback = confirm_callback
+        cancel.callback = cancel_callback
+        view.add_item(confirm)
+        view.add_item(cancel)
+        await interaction.edit_original_response(content=preview(), view=view)
 
     async def _dispatch_announcements(self) -> None:
         for record_id, channel_id, content, attachments in await self._claim_due_channels():

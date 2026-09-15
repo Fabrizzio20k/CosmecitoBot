@@ -101,10 +101,12 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/meme imagen: texto:` genera un meme. Separa texto superior e inferior con
   `|`.
 - `/ping` comprueba que el bot esté conectado.
-- `/anuncio` registra un anuncio para un canal, inmediato o programado en hora Lima.
-- `/recordatorio` programa un DM independiente para una persona o los miembros
-  de un rol; puede enlazarse opcionalmente a un anuncio. Permite una vez,
-  diaria, semanal (uno o varios días) o mensual, con fecha de término opcional.
+- `/anuncio` pide canal, mensaje, fecha natural opcional y un archivo opcional;
+  muestra la interpretación Lima y pide confirmación antes de guardar.
+- `/recordatorio` recibe un único campo de destinatarios combinados (menciones
+  de personas, un rol y/o `yo`), mensaje, fecha natural opcional y un archivo.
+  La confirmación muestra la programación normalizada antes de crear los DMs.
+  Discord admite un adjunto por slash command; para varios usa un ZIP o la UI.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
 máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
