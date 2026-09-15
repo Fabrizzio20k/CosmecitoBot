@@ -4,7 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
 type Attachment = { id: string; filename: string; byte_size: number };
-type SchedulePlan = { scheduled_for: string; recurrence: "none" | "daily" | "weekly" | "monthly"; summary: string };
+type SchedulePlan = { scheduled_for: string; recurrence: "once" | "daily" | "weekly" | "monthly"; summary: string };
 type Delivery = { channel_id: number; scheduled_for: string; status: string; error: string | null };
 type Recipient = { user_id: number; status: string };
 type Reminder = {
@@ -17,7 +17,7 @@ type Announcement = {
 };
 
 const api = "/api";
-const recurrenceLabel: Record<string, string> = { none: "Una vez", daily: "Diario", weekly: "Semanal", monthly: "Mensual" };
+const recurrenceLabel: Record<string, string> = { once: "Una vez", daily: "Diario", weekly: "Semanal", monthly: "Mensual" };
 
 function parseIds(value: string): number[] {
   const ids = [...new Set(value.split(/[,\s]+/).filter(Boolean).map(Number))];
