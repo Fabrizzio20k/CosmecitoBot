@@ -140,7 +140,9 @@ empaquetar antes ese módulo.
 3. La UI o `/recordatorio` crea un `Reminder` independiente con uno o varios
    usuarios y/o un ID de rol; el anuncio relacionado es opcional.
 4. Al vencer la fecha, el bot materializa miembros del rol, manda DM a cada
-   destinatario y conserva estado, intento, fecha y error individual.
+   destinatario y conserva estado, intento, fecha y error individual. Las
+   recurrencias diaria, semanal o mensual crean una nueva entrega auditable al
+   finalizar; cancelar una de sus entregas cancela las futuras de esa serie.
 
 Estados de entrega: `queued`, `processing`, `sent`, `failed`, `cancelled`.
 Una reclamación `processing` con más de cinco minutos se puede recuperar tras

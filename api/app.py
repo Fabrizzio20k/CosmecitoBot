@@ -7,9 +7,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from pathlib import Path
+from typing import Literal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
@@ -19,7 +21,13 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from cosmecito_db import Database
-from cosmecito_db.models import Announcement, AnnouncementChannel, MessageAttachment, Reminder, ReminderRecipient
+from cosmecito_db.models import (
+    Announcement,
+    AnnouncementChannel,
+    MessageAttachment,
+    Reminder,
+    ReminderRecipient,
+)
 from cosmecito_db.scheduling import LIMA_TIMEZONE, RECURRENCES
 
 
@@ -52,12 +60,22 @@ def get_settings() -> Settings:
     if chunk_size < 1 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
         raise RuntimeError("RAG_CHUNK_SIZE y RAG_CHUNK_OVERLAP no son válidos")
 
+    guild_id = os.getenv("DISCORD_GUILD_ID", "").strip()
+    try:
+        discord_guild_id = int(guild_id) if guild_id else None
+    except ValueError as error:
+        raise RuntimeError("DISCORD_GUILD_ID debe ser un número entero") from error
+    if discord_guild_id is not None and discord_guild_id <= 0:
+        raise RuntimeError("DISCORD_GUILD_ID debe ser positivo")
+
     return Settings(
         admin_token=admin_token,
         qdrant_url=os.getenv("QDRANT_URL", "http://qdrant:6333").rstrip("/"),
         qdrant_collection=os.getenv("QDRANT_COLLECTION", "course_knowledge"),
         qdrant_vector_name=os.getenv("QDRANT_VECTOR_NAME", "embedding"),
-        embedding_base_url=os.getenv("RAG_EMBEDDING_BASE_URL", "http://embeddings:8081/v1").rstrip("/"),
+        embedding_base_url=os.getenv("RAG_EMBEDDING_BASE_URL", "http://embeddings:8081/v1").rstrip(
+            "/"
+        ),
         embedding_model=os.getenv("RAG_EMBEDDING_MODEL", "qwen3-embedding-4b-q4_k_m.gguf"),
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -70,7 +88,9 @@ def get_settings() -> Settings:
         llama_cpp_model=os.getenv("LLAMA_CPP_MODEL", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
         scheduler_model_timeout_seconds=float(os.getenv("SCHEDULER_MODEL_TIMEOUT_SECONDS", "45")),
         attachment_max_bytes=int(os.getenv("MESSAGE_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024))),
-        attachment_total_max_bytes=int(os.getenv("MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES", str(20 * 1024 * 1024))),
+        attachment_total_max_bytes=int(
+            os.getenv("MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES", str(20 * 1024 * 1024))
+        ),
     )
 
 
@@ -121,7 +141,10 @@ async def health() -> dict[str, str]:
         await qdrant.get_collections()
         await database.ping()
     except Exception as error:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Qdrant o PostgreSQL no disponible") from error
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Qdrant o PostgreSQL no disponible",
+        ) from error
     return {"status": "ok"}
 
 
@@ -140,6 +163,10 @@ class ReminderInput(BaseModel):
     user_ids: list[int] = Field(default_factory=list, max_length=500)
     role_id: int | None = None
     announcement_id: uuid.UUID | None = None
+    recurrence: Literal["once", "daily", "weekly", "monthly"] = "once"
+    recurrence_interval: int = Field(default=1, ge=1, le=365)
+    recurrence_weekdays: list[int] = Field(default_factory=list, max_length=7)
+    recurrence_until: datetime | None = None
 
 
 class ScheduleInstruction(BaseModel):
@@ -186,7 +213,9 @@ def _schedule_from_model(content: str, now: datetime) -> tuple[datetime, str]:
         raise ValueError("El modelo no devolvió una programación válida.") from error
     if recurrence not in RECURRENCES:
         raise ValueError("La repetición indicada no está permitida.")
-    scheduled_for = datetime.combine(scheduled_date, scheduled_time, tzinfo=LIMA_TIMEZONE).astimezone(UTC)
+    scheduled_for = datetime.combine(
+        scheduled_date, scheduled_time, tzinfo=LIMA_TIMEZONE
+    ).astimezone(UTC)
     if scheduled_for <= now:
         raise ValueError("La fecha interpretada ya pasó. Indica una fecha y hora futuras.")
     return scheduled_for, recurrence
@@ -222,12 +251,16 @@ Resuelve las referencias relativas contra la fecha/hora entregada. No inventes d
             max_tokens=120,
         )
     except (APITimeoutError, APIConnectionError, APIStatusError) as error:
-        raise HTTPException(status_code=503, detail="No se pudo consultar el modelo de programación.") from error
+        raise HTTPException(
+            status_code=503, detail="No se pudo consultar el modelo de programación."
+        ) from error
     response = completion.choices[0].message.content or ""
     try:
         scheduled_for, recurrence = _schedule_from_model(response, now)
     except ValueError as error:
-        raise HTTPException(status_code=422, detail=f"No pude interpretar la programación: {error}") from error
+        raise HTTPException(
+            status_code=422, detail=f"No pude interpretar la programación: {error}"
+        ) from error
     return _schedule_payload(scheduled_for, recurrence)
 
 
@@ -237,7 +270,9 @@ def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datet
             return datetime.now(UTC)
         raise HTTPException(status_code=422, detail="La fecha programada es obligatoria")
     if value.tzinfo is None:
-        raise HTTPException(status_code=422, detail="La fecha debe incluir zona horaria; usa UTC (Z)")
+        raise HTTPException(
+            status_code=422, detail="La fecha debe incluir zona horaria; usa UTC (Z)"
+        )
     return value.astimezone(UTC)
 
 
@@ -257,7 +292,9 @@ def _form_ids(value: str, *, field_name: str, maximum: int) -> list[int]:
     try:
         values = json.loads(value)
     except json.JSONDecodeError as error:
-        raise HTTPException(status_code=422, detail=f"{field_name} debe ser una lista JSON de IDs") from error
+        raise HTTPException(
+            status_code=422, detail=f"{field_name} debe ser una lista JSON de IDs"
+        ) from error
     if not isinstance(values, list) or not values or len(values) > maximum:
         raise HTTPException(status_code=422, detail=f"Indica entre 1 y {maximum} {field_name}")
     if any(not isinstance(item, int) or item <= 0 for item in values):
@@ -281,22 +318,30 @@ def _future_schedule(value: datetime | None, *, default_now: bool) -> datetime:
 
 async def _read_attachments(files: list[UploadFile]) -> list[MessageAttachment]:
     if len(files) > MAX_ATTACHMENTS:
-        raise HTTPException(status_code=422, detail=f"Puedes adjuntar como máximo {MAX_ATTACHMENTS} archivos")
+        raise HTTPException(
+            status_code=422, detail=f"Puedes adjuntar como máximo {MAX_ATTACHMENTS} archivos"
+        )
     attachments: list[MessageAttachment] = []
     total_size = 0
     for upload in files:
         try:
             filename = Path(upload.filename or "").name.strip()
             if filename in {"", ".", ".."}:
-                raise HTTPException(status_code=422, detail="Cada archivo debe tener un nombre válido")
+                raise HTTPException(
+                    status_code=422, detail="Cada archivo debe tener un nombre válido"
+                )
             data = await upload.read(settings.attachment_max_bytes + 1)
         finally:
             await upload.close()
         if len(data) > settings.attachment_max_bytes:
-            raise HTTPException(status_code=422, detail=f"El archivo {filename} supera el límite permitido")
+            raise HTTPException(
+                status_code=422, detail=f"El archivo {filename} supera el límite permitido"
+            )
         total_size += len(data)
         if total_size > settings.attachment_total_max_bytes:
-            raise HTTPException(status_code=422, detail="Los adjuntos superan el tamaño total permitido")
+            raise HTTPException(
+                status_code=422, detail="Los adjuntos superan el tamaño total permitido"
+            )
         attachments.append(
             MessageAttachment(
                 filename=filename[:255],
@@ -324,6 +369,17 @@ def _reminder_payload(reminder: Reminder) -> dict[str, object]:
         "content": reminder.content,
         "scheduled_for": reminder.scheduled_for.isoformat(),
         "target_role_id": reminder.target_role_id,
+        "recurrence": reminder.recurrence,
+        "recurrence_interval": reminder.recurrence_interval,
+        "recurrence_weekdays": [
+            int(value) for value in reminder.recurrence_weekdays.split(",") if value
+        ],
+        "recurrence_until": (
+            reminder.recurrence_until.isoformat() if reminder.recurrence_until else None
+        ),
+        "recurrence_group_id": (
+            str(reminder.recurrence_group_id) if reminder.recurrence_group_id else None
+        ),
         "status": reminder.status,
         "recurrence": reminder.recurrence,
         "attachments": [_attachment_payload(attachment) for attachment in reminder.attachments],
@@ -360,10 +416,7 @@ def _announcement_payload(announcement: Announcement) -> dict[str, object]:
             }
             for channel in announcement.channels
         ],
-        "reminders": [
-            _reminder_payload(reminder)
-            for reminder in announcement.reminders
-        ],
+        "reminders": [_reminder_payload(reminder) for reminder in announcement.reminders],
         "attachments": [_attachment_payload(attachment) for attachment in announcement.attachments],
     }
 
@@ -404,8 +457,12 @@ async def _create_reminder_record(
 ) -> uuid.UUID:
     user_ids = sorted(set(payload.user_ids))
     if not user_ids and payload.role_id is None:
-        raise HTTPException(status_code=422, detail="Indica al menos un usuario o un rol destinatario")
-    if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
+        raise HTTPException(
+            status_code=422, detail="Indica al menos un usuario o un rol destinatario"
+        )
+    if any(user_id <= 0 for user_id in user_ids) or (
+        payload.role_id is not None and payload.role_id <= 0
+    ):
         raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
     scheduled_for = _future_schedule(payload.scheduled_for, default_now=False)
     async with database.session() as session, session.begin():
@@ -414,12 +471,22 @@ async def _create_reminder_record(
             if announcement is None:
                 raise HTTPException(status_code=404, detail="Anuncio no encontrado")
             if announcement.status == "cancelled":
-                raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
+                raise HTTPException(
+                    status_code=409,
+                    detail="No se puede agregar un recordatorio a un anuncio cancelado",
+                )
+        reminder_id = uuid.uuid4()
         reminder = Reminder(
+            id=reminder_id,
             announcement_id=announcement_id,
             content=_message_content(payload.content),
             scheduled_for=scheduled_for,
             target_role_id=payload.role_id,
+            recurrence=recurrence,
+            recurrence_interval=recurrence_interval,
+            recurrence_weekdays=",".join(str(day) for day in recurrence_weekdays),
+            recurrence_until=recurrence_until,
+            recurrence_group_id=reminder_id if recurrence != "once" else None,
             status="scheduled",
             recurrence=payload.recurrence,
             attachments=attachments or [],
@@ -449,7 +516,9 @@ async def _create_announcement_record(
             recurrence=payload.recurrence,
             attachments=attachments or [],
             channels=[
-                AnnouncementChannel(channel_id=channel_id, scheduled_for=scheduled_for, status="queued")
+                AnnouncementChannel(
+                    channel_id=channel_id, scheduled_for=scheduled_for, status="queued"
+                )
                 for channel_id in channel_ids
             ],
         )
@@ -477,13 +546,19 @@ async def list_announcements() -> list[dict[str, object]]:
         return [_announcement_payload(announcement) for announcement in announcements]
 
 
-@app.post("/announcements", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@app.post(
+    "/announcements", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)]
+)
 async def create_announcement(payload: AnnouncementInput) -> dict[str, object]:
     announcement_id = await _create_announcement_record(payload)
     return _announcement_payload(await _load_announcement(announcement_id))
 
 
-@app.post("/announcements/upload", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@app.post(
+    "/announcements/upload",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
 async def create_announcement_with_attachments(
     content: str = Form(...),
     channel_ids: str = Form(...),
@@ -529,7 +604,9 @@ async def create_standalone_reminder(payload: ReminderInput) -> dict[str, object
     return _reminder_payload(await _load_reminder(reminder_id))
 
 
-@app.post("/reminders/upload", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@app.post(
+    "/reminders/upload", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)]
+)
 async def create_reminder_with_attachments(
     content: str = Form(...),
     scheduled_for: str = Form(...),
@@ -544,7 +621,9 @@ async def create_reminder_with_attachments(
     try:
         raw_user_ids = json.loads(user_ids)
     except json.JSONDecodeError as error:
-        raise HTTPException(status_code=422, detail="Los usuarios deben ser una lista JSON de IDs") from error
+        raise HTTPException(
+            status_code=422, detail="Los usuarios deben ser una lista JSON de IDs"
+        ) from error
     if not isinstance(raw_user_ids, list) or len(raw_user_ids) > 500:
         raise HTTPException(status_code=422, detail="Indica como máximo 500 usuarios")
     payload = ReminderInput(
@@ -563,7 +642,11 @@ async def create_reminder_with_attachments(
     return _reminder_payload(await _load_reminder(reminder_id))
 
 
-@app.post("/announcements/{announcement_id}/reminders", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+@app.post(
+    "/announcements/{announcement_id}/reminders",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_admin)],
+)
 async def create_reminder(announcement_id: uuid.UUID, payload: ReminderInput) -> dict[str, object]:
     await _create_reminder_record(payload, announcement_id)
     return _announcement_payload(await _load_announcement(announcement_id))
@@ -575,12 +658,27 @@ async def cancel_reminder(reminder_id: uuid.UUID) -> dict[str, str]:
         reminder = await session.get(Reminder, reminder_id, with_for_update=True)
         if reminder is None:
             raise HTTPException(status_code=404, detail="Recordatorio no encontrado")
-        if reminder.status in {"scheduled", "processing"}:
-            reminder.status = "cancelled"
+        reminder_ids = [reminder_id]
+        if reminder.recurrence_group_id is not None:
+            reminder_ids = list(
+                await session.scalars(
+                    select(Reminder.id)
+                    .where(Reminder.recurrence_group_id == reminder.recurrence_group_id)
+                    .with_for_update()
+                )
+            )
+        if reminder.status in {"scheduled", "processing"} or len(reminder_ids) > 1:
+            await session.execute(
+                update(Reminder)
+                .where(
+                    Reminder.id.in_(reminder_ids), Reminder.status.in_(["scheduled", "processing"])
+                )
+                .values(status="cancelled")
+            )
             await session.execute(
                 update(ReminderRecipient)
                 .where(
-                    ReminderRecipient.reminder_id == reminder_id,
+                    ReminderRecipient.reminder_id.in_(reminder_ids),
                     ReminderRecipient.status.in_(["queued", "processing"]),
                 )
                 .values(status="cancelled")
@@ -605,7 +703,10 @@ async def cancel_announcement(announcement_id: uuid.UUID) -> dict[str, str]:
         )
         await session.execute(
             update(Reminder)
-            .where(Reminder.announcement_id == announcement_id, Reminder.status.in_(["scheduled", "processing"]))
+            .where(
+                Reminder.announcement_id == announcement_id,
+                Reminder.status.in_(["scheduled", "processing"]),
+            )
             .values(status="cancelled")
         )
         await session.execute(
@@ -737,14 +838,18 @@ async def _ingest(
     if not text.strip():
         raise HTTPException(status_code=422, detail="El documento está vacío")
     if len(text.encode("utf-8")) > settings.max_document_bytes:
-        raise HTTPException(status_code=413, detail="El documento supera el tamaño máximo permitido")
+        raise HTTPException(
+            status_code=413, detail="El documento supera el tamaño máximo permitido"
+        )
 
     document_source = (source or document_id or title or "documento").strip()
     normalized_id = _normalize_document_id(document_id or document_source)
     document_title = (title or _first_heading(text) or document_source).strip()
     chunks = _chunks_from_text(normalized_id, document_title, text)
     if not chunks:
-        raise HTTPException(status_code=422, detail="No se encontró texto indexable en el documento")
+        raise HTTPException(
+            status_code=422, detail="No se encontró texto indexable en el documento"
+        )
 
     vectors = await _embed([chunk.content for chunk in chunks])
     await _ensure_collection(len(vectors[0]))
@@ -802,7 +907,9 @@ async def _embed(texts: list[str]) -> list[list[float]]:
         raise HTTPException(status_code=503, detail="No se pudieron generar embeddings") from error
     vectors = [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
     if len(vectors) != len(texts) or not vectors:
-        raise HTTPException(status_code=502, detail="El servidor de embeddings devolvió una respuesta incompleta")
+        raise HTTPException(
+            status_code=502, detail="El servidor de embeddings devolvió una respuesta incompleta"
+        )
     return vectors
 
 
@@ -855,7 +962,9 @@ def _sections(text: str, fallback_title: str) -> list[tuple[str, str]]:
 
 
 def _split_text(text: str) -> list[str]:
-    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+    paragraphs = [
+        paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()
+    ]
     chunks: list[str] = []
     current = ""
     for paragraph in paragraphs:

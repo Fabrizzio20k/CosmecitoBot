@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
 :root { --bg: #0c1016; --panel: #131a23; --panel-soft: #19212c; --line: #2a3543; --text: #e7edf4; --muted: #91a0b2; --accent: #81e6bb; --accent-ink: #072117; --danger: #ff9d9d; }
 * { box-sizing: border-box; }

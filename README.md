@@ -103,7 +103,8 @@ mediante variables de entorno al ejecutar `run_ia.sh`.
 - `/ping` comprueba que el bot esté conectado.
 - `/anuncio` registra un anuncio para un canal, inmediato o programado en hora Lima.
 - `/recordatorio` programa un DM independiente para una persona o los miembros
-  de un rol; puede enlazarse opcionalmente a un anuncio.
+  de un rol; puede enlazarse opcionalmente a un anuncio. Permite una vez,
+  diaria, semanal (uno o varios días) o mensual, con fecha de término opcional.
 
 `/chat` limita a una pregunta cada 10 segundos por usuario. Conserva como
 máximo los últimos 10 mensajes por usuario y canal; los más antiguos se
