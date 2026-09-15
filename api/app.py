@@ -28,6 +28,7 @@ from cosmecito_db.models import (
     Reminder,
     ReminderRecipient,
 )
+from cosmecito_db.reminder_recurrence import normalize_recurrence
 from cosmecito_db.scheduling import LIMA_TIMEZONE, RECURRENCES
 
 
@@ -152,14 +153,13 @@ class AnnouncementInput(BaseModel):
     content: str = Field(min_length=1, max_length=2_000)
     channel_ids: list[int] = Field(min_length=1, max_length=25)
     scheduled_for: datetime | None = None
-    recurrence: str = Field(default="none", pattern="^(none|daily|weekly|monthly)$")
+    recurrence: str = Field(default="once", pattern="^(once|daily|weekly|monthly)$")
     created_by: int | None = None
 
 
 class ReminderInput(BaseModel):
     content: str = Field(min_length=1, max_length=2_000)
     scheduled_for: datetime
-    recurrence: str = Field(default="none", pattern="^(none|daily|weekly|monthly)$")
     user_ids: list[int] = Field(default_factory=list, max_length=500)
     role_id: int | None = None
     announcement_id: uuid.UUID | None = None
@@ -179,7 +179,7 @@ def _format_lima(value: datetime) -> str:
 
 def _schedule_payload(value: datetime, recurrence: str) -> dict[str, str]:
     labels = {
-        "none": "una sola vez",
+        "once": "una sola vez",
         "daily": "todos los días",
         "weekly": "cada semana",
         "monthly": "cada mes",
@@ -228,8 +228,8 @@ async def parse_schedule(payload: ScheduleInstruction) -> dict[str, str]:
     system_prompt = """Eres un analizador de calendario, no un asistente conversacional.
 Interpreta la instrucción en español para programar un mensaje en America/Lima.
 Devuelve exclusivamente JSON válido con exactamente estas claves:
-{"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"none|daily|weekly|monthly"}.
-Usa recurrence daily solo si se pide cada día/todos los días; weekly solo si se pide cada semana o un día de la semana; monthly solo si se pide cada mes. Si no se pide repetición, usa none.
+{"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"once|daily|weekly|monthly"}.
+Usa recurrence daily solo si se pide cada día/todos los días; weekly solo si se pide cada semana o un día de la semana; monthly solo si se pide cada mes. Si no se pide repetición, usa once.
 Resuelve las referencias relativas contra la fecha/hora entregada. No inventes destinatarios ni cambies la hora. Si la instrucción es ambigua o no indica hora y fecha suficientes, devuelve {"error":"..."}."""
     try:
         completion = await scheduler_client.chat.completions.create(
@@ -465,6 +465,16 @@ async def _create_reminder_record(
     ):
         raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
     scheduled_for = _future_schedule(payload.scheduled_for, default_now=False)
+    try:
+        recurrence, recurrence_interval, recurrence_weekdays, recurrence_until = normalize_recurrence(
+            payload.recurrence,
+            payload.recurrence_interval,
+            payload.recurrence_weekdays,
+            scheduled_for,
+            _utc_datetime(payload.recurrence_until) if payload.recurrence_until else None,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     async with database.session() as session, session.begin():
         if announcement_id is not None:
             announcement = await session.get(Announcement, announcement_id)
@@ -488,7 +498,6 @@ async def _create_reminder_record(
             recurrence_until=recurrence_until,
             recurrence_group_id=reminder_id if recurrence != "once" else None,
             status="scheduled",
-            recurrence=payload.recurrence,
             attachments=attachments or [],
             recipients=[
                 ReminderRecipient(user_id=user_id, source="direct", status="queued")
@@ -563,7 +572,7 @@ async def create_announcement_with_attachments(
     content: str = Form(...),
     channel_ids: str = Form(...),
     scheduled_for: str | None = Form(default=None),
-    recurrence: str = Form(default="none"),
+    recurrence: str = Form(default="once"),
     files: list[UploadFile] = File(default=[]),
 ) -> dict[str, object]:
     if recurrence not in RECURRENCES:
@@ -613,7 +622,7 @@ async def create_reminder_with_attachments(
     user_ids: str = Form(default="[]"),
     role_id: int | None = Form(default=None),
     announcement_id: uuid.UUID | None = Form(default=None),
-    recurrence: str = Form(default="none"),
+    recurrence: str = Form(default="once"),
     files: list[UploadFile] = File(default=[]),
 ) -> dict[str, object]:
     if recurrence not in RECURRENCES:

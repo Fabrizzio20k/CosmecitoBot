@@ -8,12 +8,12 @@ from zoneinfo import ZoneInfo
 
 
 LIMA_TIMEZONE = ZoneInfo("America/Lima")
-RECURRENCES = frozenset({"none", "daily", "weekly", "monthly"})
+RECURRENCES = frozenset({"once", "daily", "weekly", "monthly"})
 
 
 def next_occurrence(value: datetime, recurrence: str) -> datetime | None:
     """Devuelve la siguiente ocurrencia conservando la hora local de Lima."""
-    if recurrence == "none":
+    if recurrence == "once":
         return None
     if recurrence not in RECURRENCES:
         raise ValueError("Recurrencia no válida")

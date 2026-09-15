@@ -5,16 +5,14 @@ import sqlalchemy as sa
 
 
 revision = "20260914_03"
-down_revision = "20260904_02"
+down_revision = "20260905_03"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("announcements", sa.Column("recurrence", sa.String(length=16), server_default="none", nullable=False))
+    op.add_column("announcements", sa.Column("recurrence", sa.String(length=16), server_default="once", nullable=False))
     op.add_column("announcements", sa.Column("recurrence_scheduled_at", sa.DateTime(timezone=True)))
-    op.add_column("reminders", sa.Column("recurrence", sa.String(length=16), server_default="none", nullable=False))
-    op.add_column("reminders", sa.Column("recurrence_scheduled_at", sa.DateTime(timezone=True)))
     op.create_table(
         "message_attachments",
         sa.Column("id", sa.Uuid(), nullable=False),
@@ -41,7 +39,5 @@ def downgrade() -> None:
     op.drop_index("idx_message_attachments_reminder", table_name="message_attachments")
     op.drop_index("idx_message_attachments_announcement", table_name="message_attachments")
     op.drop_table("message_attachments")
-    op.drop_column("reminders", "recurrence_scheduled_at")
-    op.drop_column("reminders", "recurrence")
     op.drop_column("announcements", "recurrence_scheduled_at")
     op.drop_column("announcements", "recurrence")

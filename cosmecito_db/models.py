@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    Integer,
     LargeBinary,
     String,
     Text,
@@ -52,7 +53,7 @@ class Announcement(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
-    recurrence: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
+    recurrence: Mapped[str] = mapped_column(String(16), default="once", nullable=False)
     recurrence_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -110,8 +111,6 @@ class Reminder(Base):
     recurrence_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recurrence_group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
-    recurrence: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
-    recurrence_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

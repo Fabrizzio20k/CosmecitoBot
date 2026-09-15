@@ -18,7 +18,12 @@ from cosmecito_db.models import (
     Reminder,
     ReminderRecipient,
 )
-from cosmecito_db.scheduling import next_occurrence
+from cosmecito_db.reminder_recurrence import (
+    LIMA_TIMEZONE,
+    next_occurrence as next_reminder_occurrence,
+    normalize_recurrence,
+)
+from cosmecito_db.scheduling import next_occurrence as next_announcement_occurrence
 
 
 class AnnouncementCog(commands.Cog):
@@ -329,10 +334,10 @@ class AnnouncementCog(commands.Cog):
                 announcement.status = self._aggregate_status(channel_statuses)
                 if (
                     announcement.status in {"completed", "failed", "partially_failed"}
-                    and announcement.recurrence != "none"
+                    and announcement.recurrence != "once"
                     and announcement.recurrence_scheduled_at is None
                 ):
-                    next_scheduled_for = next_occurrence(
+                    next_scheduled_for = next_announcement_occurrence(
                         record.scheduled_for, announcement.recurrence
                     )
                     if next_scheduled_for is not None:
@@ -504,6 +509,8 @@ class AnnouncementCog(commands.Cog):
             reminder = await session.get(Reminder, reminder_id, with_for_update=True)
             if reminder is None:
                 return
+            if reminder.status != "processing":
+                return
             statuses = list(
                 await session.scalars(
                     select(ReminderRecipient.status).where(
@@ -521,9 +528,16 @@ class AnnouncementCog(commands.Cog):
             await self._schedule_next_reminder(session, reminder)
 
     async def _schedule_next_reminder(self, session, reminder: Reminder) -> None:
-        if reminder.recurrence == "none" or reminder.recurrence_scheduled_at is not None:
+        if reminder.recurrence == "once":
             return
-        next_scheduled_for = next_occurrence(reminder.scheduled_for, reminder.recurrence)
+        weekdays = tuple(int(value) for value in reminder.recurrence_weekdays.split(",") if value)
+        next_scheduled_for = next_reminder_occurrence(
+            reminder.scheduled_for,
+            reminder.recurrence,
+            reminder.recurrence_interval,
+            weekdays,
+            reminder.recurrence_until,
+        )
         if next_scheduled_for is None:
             return
         direct_user_ids = list(
@@ -539,15 +553,19 @@ class AnnouncementCog(commands.Cog):
                 select(MessageAttachment).where(MessageAttachment.reminder_id == reminder.id)
             )
         )
-        reminder.recurrence_scheduled_at = next_scheduled_for
         session.add(
             Reminder(
+                id=uuid.uuid4(),
                 announcement_id=reminder.announcement_id,
                 content=reminder.content,
                 scheduled_for=next_scheduled_for,
                 target_role_id=reminder.target_role_id,
                 status="scheduled",
                 recurrence=reminder.recurrence,
+                recurrence_interval=reminder.recurrence_interval,
+                recurrence_weekdays=reminder.recurrence_weekdays,
+                recurrence_until=reminder.recurrence_until,
+                recurrence_group_id=reminder.recurrence_group_id,
                 recipients=[
                     ReminderRecipient(user_id=user_id, source="direct", status="queued")
                     for user_id in direct_user_ids
