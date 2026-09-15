@@ -119,7 +119,15 @@ como envío fallido en la UI.
 La UI tiene una sección **Anuncios**. Desde ella se crean anuncios globales en
 uno o varios canales mediante IDs de canal y recordatorios privados
 independientes o relacionados a un anuncio, para varios IDs de usuario, un rol
-o ambos. El selector de fecha se interpreta siempre en hora Lima. Cada entrega
+o ambos. Describe la fecha en lenguaje natural, por ejemplo `el próximo lunes a
+las 9:30, repetir cada semana`: el modelo local propone una fecha en hora Lima
+y una repetición diaria, semanal o mensual. La vista previa debe confirmarse
+antes de guardar y el servidor valida que sea futura.
+
+Los anuncios sin instrucción se publican de inmediato; los recordatorios siempre
+requieren una programación confirmada. Se pueden adjuntar hasta 10 archivos
+(8 MiB por archivo y 20 MiB en total). Los archivos se guardan junto al mensaje
+en PostgreSQL y el bot los reenvía en cada entrega y repetición. Cada entrega
 conserva estado, fecha y error. Los IDs se pueden activar en Discord con el
 modo desarrollador (`Copiar ID`).
 
@@ -148,6 +156,9 @@ RAG_TOP_K=4
 RAG_MIN_SCORE=0.45
 QDRANT_COLLECTION=course_knowledge
 API_ADMIN_TOKEN=un_secreto_largo
+SCHEDULER_MODEL_TIMEOUT_SECONDS=45
+MESSAGE_ATTACHMENT_MAX_BYTES=8388608
+MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES=20971520
 ```
 
 `API_ADMIN_TOKEN` es obligatorio para la API. La UI no lo conoce en el

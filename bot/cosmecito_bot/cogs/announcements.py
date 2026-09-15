@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.orm import selectinload
 
-from cosmecito_db.models import Announcement, AnnouncementChannel, Reminder, ReminderRecipient
+from cosmecito_db.models import Announcement, AnnouncementChannel, MessageAttachment, Reminder, ReminderRecipient
+from cosmecito_db.scheduling import next_occurrence
 
 
 class AnnouncementCog(commands.Cog):
@@ -170,24 +173,27 @@ class AnnouncementCog(commands.Cog):
         return reminder
 
     async def _dispatch_announcements(self) -> None:
-        for record_id, channel_id, content in await self._claim_due_channels():
+        for record_id, channel_id, content, attachments in await self._claim_due_channels():
             try:
                 channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
                 if not isinstance(channel, discord.abc.Messageable):
                     raise RuntimeError("El destino no acepta mensajes")
-                message = await channel.send(content)
+                message = await channel.send(content, files=self._discord_files(attachments))
             except (discord.DiscordException, RuntimeError) as error:
                 await self._finish_channel(record_id, error=str(error))
             else:
                 await self._finish_channel(record_id, message_id=message.id)
 
-    async def _claim_due_channels(self) -> list[tuple[int, int, str]]:
+    async def _claim_due_channels(self) -> list[tuple[int, int, str, list[tuple[str, str | None, bytes]]]]:
         now = datetime.now(UTC)
         stale_before = now - self.stale_claim_after
         async with self.sessions() as session, session.begin():
-            rows = await session.execute(
-                select(AnnouncementChannel.id, AnnouncementChannel.channel_id, Announcement.content)
+            rows = await session.scalars(
+                select(AnnouncementChannel)
                 .join(Announcement)
+                .options(
+                    selectinload(AnnouncementChannel.announcement).selectinload(Announcement.attachments)
+                )
                 .where(
                     AnnouncementChannel.scheduled_for <= now,
                     Announcement.status != "cancelled",
@@ -204,13 +210,21 @@ class AnnouncementCog(commands.Cog):
                 .with_for_update(skip_locked=True)
             )
             records = rows.all()
-            for record_id, _, _ in records:
+            for record in records:
                 await session.execute(
                     update(AnnouncementChannel)
-                    .where(AnnouncementChannel.id == record_id)
+                    .where(AnnouncementChannel.id == record.id)
                     .values(status="processing", claimed_at=now, attempts=AnnouncementChannel.attempts + 1)
                 )
-        return [(record_id, channel_id, content) for record_id, channel_id, content in records]
+        return [
+            (
+                record.id,
+                record.channel_id,
+                record.announcement.content,
+                [(attachment.filename, attachment.content_type, attachment.data) for attachment in record.announcement.attachments],
+            )
+            for record in records
+        ]
 
     async def _finish_channel(self, record_id: int, message_id: int | None = None, error: str | None = None) -> None:
         async with self.sessions() as session, session.begin():
@@ -221,19 +235,51 @@ class AnnouncementCog(commands.Cog):
             record.discord_message_id = message_id
             record.sent_at = datetime.now(UTC) if message_id else None
             record.error = error[:1_000] if error else None
-            channel_statuses = list(
-                await session.scalars(
-                    select(AnnouncementChannel.status).where(
-                        AnnouncementChannel.announcement_id == record.announcement_id
+            announcement = await session.scalar(
+                select(Announcement)
+                .where(Announcement.id == record.announcement_id)
+                .options(selectinload(Announcement.channels), selectinload(Announcement.attachments))
+                .with_for_update()
+            )
+            if announcement is not None:
+                # El bloqueo del padre serializa el cálculo y evita crear cero
+                # o dos ocurrencias cuando varios canales terminan a la vez.
+                channel_statuses = list(
+                    await session.scalars(
+                        select(AnnouncementChannel.status).where(
+                            AnnouncementChannel.announcement_id == record.announcement_id
+                        )
                     )
                 )
-            )
-            announcement = await session.get(Announcement, record.announcement_id, with_for_update=True)
-            if announcement is not None:
                 announcement.status = self._aggregate_status(channel_statuses)
+                if (
+                    announcement.status in {"completed", "failed", "partially_failed"}
+                    and announcement.recurrence != "none"
+                    and announcement.recurrence_scheduled_at is None
+                ):
+                    next_scheduled_for = next_occurrence(record.scheduled_for, announcement.recurrence)
+                    if next_scheduled_for is not None:
+                        announcement.recurrence_scheduled_at = next_scheduled_for
+                        session.add(
+                            Announcement(
+                                content=announcement.content,
+                                created_by=announcement.created_by,
+                                status="scheduled",
+                                recurrence=announcement.recurrence,
+                                channels=[
+                                    AnnouncementChannel(
+                                        channel_id=channel.channel_id,
+                                        scheduled_for=next_scheduled_for,
+                                        status="queued",
+                                    )
+                                    for channel in announcement.channels
+                                ],
+                                attachments=[self._copy_attachment(attachment) for attachment in announcement.attachments],
+                            )
+                        )
 
     async def _dispatch_reminders(self) -> None:
-        for reminder_id, content, role_id in await self._claim_due_reminders():
+        for reminder_id, content, role_id, attachments in await self._claim_due_reminders():
             if role_id is not None:
                 recipients = await self._members_for_role(role_id)
                 if recipients is None:
@@ -243,19 +289,22 @@ class AnnouncementCog(commands.Cog):
             for recipient_id, user_id in await self._claim_recipients(reminder_id):
                 try:
                     user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-                    await user.send(content)
+                    await user.send(content, files=self._discord_files(attachments))
                 except discord.DiscordException as error:
                     await self._finish_recipient(recipient_id, error=str(error))
                 else:
                     await self._finish_recipient(recipient_id)
             await self._finish_reminder_if_ready(reminder_id)
 
-    async def _claim_due_reminders(self) -> list[tuple[uuid.UUID, str, int | None]]:
+    async def _claim_due_reminders(
+        self,
+    ) -> list[tuple[uuid.UUID, str, int | None, list[tuple[str, str | None, bytes]]]]:
         now = datetime.now(UTC)
         stale_before = now - self.stale_claim_after
         async with self.sessions() as session, session.begin():
-            rows = await session.execute(
-                select(Reminder.id, Reminder.content, Reminder.target_role_id)
+            rows = await session.scalars(
+                select(Reminder)
+                .options(selectinload(Reminder.attachments))
                 .where(
                     Reminder.scheduled_for <= now,
                     or_(
@@ -268,13 +317,21 @@ class AnnouncementCog(commands.Cog):
                 .with_for_update(skip_locked=True)
             )
             reminders = rows.all()
-            for reminder_id, _, _ in reminders:
+            for reminder in reminders:
                 await session.execute(
                     update(Reminder)
-                    .where(Reminder.id == reminder_id)
+                    .where(Reminder.id == reminder.id)
                     .values(status="processing", claimed_at=now)
                 )
-        return reminders
+        return [
+            (
+                reminder.id,
+                reminder.content,
+                reminder.target_role_id,
+                [(attachment.filename, attachment.content_type, attachment.data) for attachment in reminder.attachments],
+            )
+            for reminder in reminders
+        ]
 
     async def _members_for_role(self, role_id: int) -> list[int] | None:
         guild = self.bot.get_guild(self.bot.settings.guild_id)
@@ -345,9 +402,13 @@ class AnnouncementCog(commands.Cog):
             reminder = await session.get(Reminder, reminder_id, with_for_update=True)
             if reminder is not None:
                 reminder.status = "failed"
+                await self._schedule_next_reminder(session, reminder)
 
     async def _finish_reminder_if_ready(self, reminder_id: uuid.UUID) -> None:
         async with self.sessions() as session, session.begin():
+            reminder = await session.get(Reminder, reminder_id, with_for_update=True)
+            if reminder is None:
+                return
             statuses = list(
                 await session.scalars(
                     select(ReminderRecipient.status).where(ReminderRecipient.reminder_id == reminder_id)
@@ -355,10 +416,60 @@ class AnnouncementCog(commands.Cog):
             )
             if any(status in {"queued", "processing"} for status in statuses):
                 return
-            reminder = await session.get(Reminder, reminder_id, with_for_update=True)
-            if reminder is None:
-                return
             reminder.status = "failed" if statuses and all(status == "failed" for status in statuses) else "completed"
+            await self._schedule_next_reminder(session, reminder)
+
+    async def _schedule_next_reminder(self, session, reminder: Reminder) -> None:
+        if reminder.recurrence == "none" or reminder.recurrence_scheduled_at is not None:
+            return
+        next_scheduled_for = next_occurrence(reminder.scheduled_for, reminder.recurrence)
+        if next_scheduled_for is None:
+            return
+        direct_user_ids = list(
+            await session.scalars(
+                select(ReminderRecipient.user_id).where(
+                    ReminderRecipient.reminder_id == reminder.id,
+                    ReminderRecipient.source == "direct",
+                )
+            )
+        )
+        attachments = list(
+            await session.scalars(
+                select(MessageAttachment).where(MessageAttachment.reminder_id == reminder.id)
+            )
+        )
+        reminder.recurrence_scheduled_at = next_scheduled_for
+        session.add(
+            Reminder(
+                announcement_id=reminder.announcement_id,
+                content=reminder.content,
+                scheduled_for=next_scheduled_for,
+                target_role_id=reminder.target_role_id,
+                status="scheduled",
+                recurrence=reminder.recurrence,
+                recipients=[
+                    ReminderRecipient(user_id=user_id, source="direct", status="queued")
+                    for user_id in direct_user_ids
+                ],
+                attachments=[self._copy_attachment(attachment) for attachment in attachments],
+            )
+        )
+
+    @staticmethod
+    def _copy_attachment(attachment: MessageAttachment) -> MessageAttachment:
+        return MessageAttachment(
+            filename=attachment.filename,
+            content_type=attachment.content_type,
+            byte_size=attachment.byte_size,
+            data=attachment.data,
+        )
+
+    @staticmethod
+    def _discord_files(attachments: list[tuple[str, str | None, bytes]]) -> list[discord.File]:
+        return [
+            discord.File(BytesIO(data), filename=filename, description=content_type)
+            for filename, content_type, data in attachments
+        ]
 
     @staticmethod
     def _aggregate_status(statuses: list[str]) -> str:

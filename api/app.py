@@ -1,24 +1,26 @@
+import json
 import os
 import re
 import secrets
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Form, Header, HTTPException, status
-from openai import AsyncOpenAI
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient, models
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from cosmecito_db import Database
-from cosmecito_db.models import Announcement, AnnouncementChannel, Reminder, ReminderRecipient
+from cosmecito_db.models import Announcement, AnnouncementChannel, MessageAttachment, Reminder, ReminderRecipient
+from cosmecito_db.scheduling import LIMA_TIMEZONE, RECURRENCES
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,11 @@ class Settings:
     chunk_overlap: int
     max_document_bytes: int
     database_url: str
+    llama_cpp_base_url: str
+    llama_cpp_model: str
+    scheduler_model_timeout_seconds: float
+    attachment_max_bytes: int
+    attachment_total_max_bytes: int
 
 
 def get_settings() -> Settings:
@@ -59,6 +66,11 @@ def get_settings() -> Settings:
             "DATABASE_URL",
             "postgresql+asyncpg://cosmecito:cosmecito@127.0.0.1:5432/cosmecito",
         ),
+        llama_cpp_base_url=os.getenv("LLAMA_CPP_BASE_URL", "http://chat:8080/v1").rstrip("/"),
+        llama_cpp_model=os.getenv("LLAMA_CPP_MODEL", "qwen2.5-1.5b-instruct-q4_k_m.gguf"),
+        scheduler_model_timeout_seconds=float(os.getenv("SCHEDULER_MODEL_TIMEOUT_SECONDS", "45")),
+        attachment_max_bytes=int(os.getenv("MESSAGE_ATTACHMENT_MAX_BYTES", str(8 * 1024 * 1024))),
+        attachment_total_max_bytes=int(os.getenv("MESSAGE_ATTACHMENT_TOTAL_MAX_BYTES", str(20 * 1024 * 1024))),
     )
 
 
@@ -70,8 +82,15 @@ embeddings_client = AsyncOpenAI(
     api_key="local-llama-cpp",
     timeout=600,
 )
+scheduler_client = AsyncOpenAI(
+    base_url=settings.llama_cpp_base_url,
+    api_key="local-llama-cpp",
+    timeout=settings.scheduler_model_timeout_seconds,
+)
 database = Database(settings.database_url)
 app = FastAPI(title="Cosmecito knowledge API", version="1.0.0")
+
+MAX_ATTACHMENTS = 10
 
 
 @dataclass(frozen=True)
@@ -92,6 +111,7 @@ async def require_admin(
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await qdrant.close()
+    await scheduler_client.close()
     await database.close()
 
 
@@ -109,15 +129,106 @@ class AnnouncementInput(BaseModel):
     content: str = Field(min_length=1, max_length=2_000)
     channel_ids: list[int] = Field(min_length=1, max_length=25)
     scheduled_for: datetime | None = None
+    recurrence: str = Field(default="none", pattern="^(none|daily|weekly|monthly)$")
     created_by: int | None = None
 
 
 class ReminderInput(BaseModel):
     content: str = Field(min_length=1, max_length=2_000)
     scheduled_for: datetime
+    recurrence: str = Field(default="none", pattern="^(none|daily|weekly|monthly)$")
     user_ids: list[int] = Field(default_factory=list, max_length=500)
     role_id: int | None = None
     announcement_id: uuid.UUID | None = None
+
+
+class ScheduleInstruction(BaseModel):
+    instruction: str = Field(min_length=1, max_length=500)
+
+
+def _format_lima(value: datetime) -> str:
+    return value.astimezone(LIMA_TIMEZONE).strftime("%A %d/%m/%Y, %H:%M (Lima)")
+
+
+def _schedule_payload(value: datetime, recurrence: str) -> dict[str, str]:
+    labels = {
+        "none": "una sola vez",
+        "daily": "todos los días",
+        "weekly": "cada semana",
+        "monthly": "cada mes",
+    }
+    return {
+        "scheduled_for": value.isoformat(),
+        "recurrence": recurrence,
+        "summary": f"{_format_lima(value)} · {labels[recurrence]}",
+        "timezone": "America/Lima",
+    }
+
+
+def _schedule_from_model(content: str, now: datetime) -> tuple[datetime, str]:
+    match = re.search(r"\{.*\}", content.strip(), flags=re.DOTALL)
+    if match is None:
+        raise ValueError("El modelo no devolvió una fecha válida.")
+    try:
+        result = json.loads(match.group())
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("date"), str)
+            or not isinstance(result.get("time"), str)
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["date"])
+            or not re.fullmatch(r"\d{2}:\d{2}", result["time"])
+        ):
+            raise ValueError
+        scheduled_date = date.fromisoformat(result["date"])
+        scheduled_time = time.fromisoformat(result["time"])
+        recurrence = result["recurrence"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("El modelo no devolvió una programación válida.") from error
+    if recurrence not in RECURRENCES:
+        raise ValueError("La repetición indicada no está permitida.")
+    scheduled_for = datetime.combine(scheduled_date, scheduled_time, tzinfo=LIMA_TIMEZONE).astimezone(UTC)
+    if scheduled_for <= now:
+        raise ValueError("La fecha interpretada ya pasó. Indica una fecha y hora futuras.")
+    return scheduled_for, recurrence
+
+
+@app.post("/schedules/parse", dependencies=[Depends(require_admin)])
+async def parse_schedule(payload: ScheduleInstruction) -> dict[str, str]:
+    now = datetime.now(UTC)
+    now_lima = now.astimezone(LIMA_TIMEZONE)
+    system_prompt = """Eres un analizador de calendario, no un asistente conversacional.
+Interpreta la instrucción en español para programar un mensaje en America/Lima.
+Devuelve exclusivamente JSON válido con exactamente estas claves:
+{"date":"YYYY-MM-DD","time":"HH:MM","recurrence":"none|daily|weekly|monthly"}.
+Usa recurrence daily solo si se pide cada día/todos los días; weekly solo si se pide cada semana o un día de la semana; monthly solo si se pide cada mes. Si no se pide repetición, usa none.
+Resuelve las referencias relativas contra la fecha/hora entregada. No inventes destinatarios ni cambies la hora. Si la instrucción es ambigua o no indica hora y fecha suficientes, devuelve {"error":"..."}."""
+    try:
+        completion = await scheduler_client.chat.completions.create(
+            model=settings.llama_cpp_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "now_lima": now_lima.strftime("%Y-%m-%d %H:%M"),
+                            "instruction": payload.instruction.strip(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+    except (APITimeoutError, APIConnectionError, APIStatusError) as error:
+        raise HTTPException(status_code=503, detail="No se pudo consultar el modelo de programación.") from error
+    response = completion.choices[0].message.content or ""
+    try:
+        scheduled_for, recurrence = _schedule_from_model(response, now)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=f"No pude interpretar la programación: {error}") from error
+    return _schedule_payload(scheduled_for, recurrence)
 
 
 def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datetime:
@@ -130,6 +241,82 @@ def _utc_datetime(value: datetime | None, *, default_now: bool = False) -> datet
     return value.astimezone(UTC)
 
 
+def _form_datetime(value: str | None, *, required: bool) -> datetime | None:
+    if not value:
+        if required:
+            raise HTTPException(status_code=422, detail="La fecha programada es obligatoria")
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="La fecha programada no es válida") from error
+    return _utc_datetime(parsed)
+
+
+def _form_ids(value: str, *, field_name: str, maximum: int) -> list[int]:
+    try:
+        values = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail=f"{field_name} debe ser una lista JSON de IDs") from error
+    if not isinstance(values, list) or not values or len(values) > maximum:
+        raise HTTPException(status_code=422, detail=f"Indica entre 1 y {maximum} {field_name}")
+    if any(not isinstance(item, int) or item <= 0 for item in values):
+        raise HTTPException(status_code=422, detail=f"Los IDs de {field_name} deben ser positivos")
+    return sorted(set(values))
+
+
+def _message_content(value: str) -> str:
+    content = value.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="El mensaje no puede estar vacío")
+    return content
+
+
+def _future_schedule(value: datetime | None, *, default_now: bool) -> datetime:
+    scheduled_for = _utc_datetime(value, default_now=default_now)
+    if value is not None and scheduled_for <= datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="La fecha programada debe ser futura")
+    return scheduled_for
+
+
+async def _read_attachments(files: list[UploadFile]) -> list[MessageAttachment]:
+    if len(files) > MAX_ATTACHMENTS:
+        raise HTTPException(status_code=422, detail=f"Puedes adjuntar como máximo {MAX_ATTACHMENTS} archivos")
+    attachments: list[MessageAttachment] = []
+    total_size = 0
+    for upload in files:
+        try:
+            filename = Path(upload.filename or "").name.strip()
+            if filename in {"", ".", ".."}:
+                raise HTTPException(status_code=422, detail="Cada archivo debe tener un nombre válido")
+            data = await upload.read(settings.attachment_max_bytes + 1)
+        finally:
+            await upload.close()
+        if len(data) > settings.attachment_max_bytes:
+            raise HTTPException(status_code=422, detail=f"El archivo {filename} supera el límite permitido")
+        total_size += len(data)
+        if total_size > settings.attachment_total_max_bytes:
+            raise HTTPException(status_code=422, detail="Los adjuntos superan el tamaño total permitido")
+        attachments.append(
+            MessageAttachment(
+                filename=filename[:255],
+                content_type=(upload.content_type or None),
+                byte_size=len(data),
+                data=data,
+            )
+        )
+    return attachments
+
+
+def _attachment_payload(attachment: MessageAttachment) -> dict[str, object]:
+    return {
+        "id": str(attachment.id),
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "byte_size": attachment.byte_size,
+    }
+
+
 def _reminder_payload(reminder: Reminder) -> dict[str, object]:
     return {
         "id": str(reminder.id),
@@ -138,6 +325,8 @@ def _reminder_payload(reminder: Reminder) -> dict[str, object]:
         "scheduled_for": reminder.scheduled_for.isoformat(),
         "target_role_id": reminder.target_role_id,
         "status": reminder.status,
+        "recurrence": reminder.recurrence,
+        "attachments": [_attachment_payload(attachment) for attachment in reminder.attachments],
         "recipients": [
             {
                 "user_id": recipient.user_id,
@@ -157,6 +346,7 @@ def _announcement_payload(announcement: Announcement) -> dict[str, object]:
         "content": announcement.content,
         "created_by": announcement.created_by,
         "status": announcement.status,
+        "recurrence": announcement.recurrence,
         "created_at": announcement.created_at.isoformat(),
         "channels": [
             {
@@ -174,6 +364,7 @@ def _announcement_payload(announcement: Announcement) -> dict[str, object]:
             _reminder_payload(reminder)
             for reminder in announcement.reminders
         ],
+        "attachments": [_attachment_payload(attachment) for attachment in announcement.attachments],
     }
 
 
@@ -185,6 +376,8 @@ async def _load_announcement(announcement_id: uuid.UUID) -> Announcement:
             .options(
                 selectinload(Announcement.channels),
                 selectinload(Announcement.reminders).selectinload(Reminder.recipients),
+                selectinload(Announcement.reminders).selectinload(Reminder.attachments),
+                selectinload(Announcement.attachments),
             )
         )
         if announcement is None:
@@ -197,7 +390,7 @@ async def _load_reminder(reminder_id: uuid.UUID) -> Reminder:
         reminder = await session.scalar(
             select(Reminder)
             .where(Reminder.id == reminder_id)
-            .options(selectinload(Reminder.recipients))
+            .options(selectinload(Reminder.recipients), selectinload(Reminder.attachments))
         )
         if reminder is None:
             raise HTTPException(status_code=404, detail="Recordatorio no encontrado")
@@ -207,13 +400,14 @@ async def _load_reminder(reminder_id: uuid.UUID) -> Reminder:
 async def _create_reminder_record(
     payload: ReminderInput,
     announcement_id: uuid.UUID | None,
+    attachments: list[MessageAttachment] | None = None,
 ) -> uuid.UUID:
     user_ids = sorted(set(payload.user_ids))
     if not user_ids and payload.role_id is None:
         raise HTTPException(status_code=422, detail="Indica al menos un usuario o un rol destinatario")
     if any(user_id <= 0 for user_id in user_ids) or (payload.role_id is not None and payload.role_id <= 0):
         raise HTTPException(status_code=422, detail="Los IDs de usuario y rol deben ser positivos")
-    scheduled_for = _utc_datetime(payload.scheduled_for)
+    scheduled_for = _future_schedule(payload.scheduled_for, default_now=False)
     async with database.session() as session, session.begin():
         if announcement_id is not None:
             announcement = await session.get(Announcement, announcement_id)
@@ -223,10 +417,12 @@ async def _create_reminder_record(
                 raise HTTPException(status_code=409, detail="No se puede agregar un recordatorio a un anuncio cancelado")
         reminder = Reminder(
             announcement_id=announcement_id,
-            content=payload.content.strip(),
+            content=_message_content(payload.content),
             scheduled_for=scheduled_for,
             target_role_id=payload.role_id,
             status="scheduled",
+            recurrence=payload.recurrence,
+            attachments=attachments or [],
             recipients=[
                 ReminderRecipient(user_id=user_id, source="direct", status="queued")
                 for user_id in user_ids
@@ -235,6 +431,31 @@ async def _create_reminder_record(
         session.add(reminder)
         await session.flush()
         return reminder.id
+
+
+async def _create_announcement_record(
+    payload: AnnouncementInput,
+    attachments: list[MessageAttachment] | None = None,
+) -> uuid.UUID:
+    channel_ids = sorted(set(payload.channel_ids))
+    if any(channel_id <= 0 for channel_id in channel_ids):
+        raise HTTPException(status_code=422, detail="Los IDs de canal deben ser positivos")
+    scheduled_for = _future_schedule(payload.scheduled_for, default_now=True)
+    async with database.session() as session, session.begin():
+        announcement = Announcement(
+            content=_message_content(payload.content),
+            created_by=payload.created_by,
+            status="scheduled",
+            recurrence=payload.recurrence,
+            attachments=attachments or [],
+            channels=[
+                AnnouncementChannel(channel_id=channel_id, scheduled_for=scheduled_for, status="queued")
+                for channel_id in channel_ids
+            ],
+        )
+        session.add(announcement)
+        await session.flush()
+        return announcement.id
 
 
 @app.get("/announcements", dependencies=[Depends(require_admin)])
@@ -246,6 +467,8 @@ async def list_announcements() -> list[dict[str, object]]:
                 .options(
                     selectinload(Announcement.channels),
                     selectinload(Announcement.reminders).selectinload(Reminder.recipients),
+                    selectinload(Announcement.reminders).selectinload(Reminder.attachments),
+                    selectinload(Announcement.attachments),
                 )
                 .order_by(Announcement.created_at.desc())
                 .limit(100)
@@ -256,23 +479,27 @@ async def list_announcements() -> list[dict[str, object]]:
 
 @app.post("/announcements", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def create_announcement(payload: AnnouncementInput) -> dict[str, object]:
-    channel_ids = sorted(set(payload.channel_ids))
-    if any(channel_id <= 0 for channel_id in channel_ids):
-        raise HTTPException(status_code=422, detail="Los IDs de canal deben ser positivos")
-    scheduled_for = _utc_datetime(payload.scheduled_for, default_now=True)
-    async with database.session() as session, session.begin():
-        announcement = Announcement(
-            content=payload.content.strip(),
-            created_by=payload.created_by,
-            status="scheduled",
-            channels=[
-                AnnouncementChannel(channel_id=channel_id, scheduled_for=scheduled_for, status="queued")
-                for channel_id in channel_ids
-            ],
-        )
-        session.add(announcement)
-        await session.flush()
-        announcement_id = announcement.id
+    announcement_id = await _create_announcement_record(payload)
+    return _announcement_payload(await _load_announcement(announcement_id))
+
+
+@app.post("/announcements/upload", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_announcement_with_attachments(
+    content: str = Form(...),
+    channel_ids: str = Form(...),
+    scheduled_for: str | None = Form(default=None),
+    recurrence: str = Form(default="none"),
+    files: list[UploadFile] = File(default=[]),
+) -> dict[str, object]:
+    if recurrence not in RECURRENCES:
+        raise HTTPException(status_code=422, detail="La repetición no es válida")
+    payload = AnnouncementInput(
+        content=content,
+        channel_ids=_form_ids(channel_ids, field_name="canales", maximum=25),
+        scheduled_for=_form_datetime(scheduled_for, required=False),
+        recurrence=recurrence,
+    )
+    announcement_id = await _create_announcement_record(payload, await _read_attachments(files))
     return _announcement_payload(await _load_announcement(announcement_id))
 
 
@@ -288,7 +515,7 @@ async def list_standalone_reminders() -> list[dict[str, object]]:
             await session.scalars(
                 select(Reminder)
                 .where(Reminder.announcement_id.is_(None))
-                .options(selectinload(Reminder.recipients))
+                .options(selectinload(Reminder.recipients), selectinload(Reminder.attachments))
                 .order_by(Reminder.scheduled_for.desc())
                 .limit(100)
             )
@@ -299,6 +526,40 @@ async def list_standalone_reminders() -> list[dict[str, object]]:
 @app.post("/reminders", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
 async def create_standalone_reminder(payload: ReminderInput) -> dict[str, object]:
     reminder_id = await _create_reminder_record(payload, payload.announcement_id)
+    return _reminder_payload(await _load_reminder(reminder_id))
+
+
+@app.post("/reminders/upload", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
+async def create_reminder_with_attachments(
+    content: str = Form(...),
+    scheduled_for: str = Form(...),
+    user_ids: str = Form(default="[]"),
+    role_id: int | None = Form(default=None),
+    announcement_id: uuid.UUID | None = Form(default=None),
+    recurrence: str = Form(default="none"),
+    files: list[UploadFile] = File(default=[]),
+) -> dict[str, object]:
+    if recurrence not in RECURRENCES:
+        raise HTTPException(status_code=422, detail="La repetición no es válida")
+    try:
+        raw_user_ids = json.loads(user_ids)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="Los usuarios deben ser una lista JSON de IDs") from error
+    if not isinstance(raw_user_ids, list) or len(raw_user_ids) > 500:
+        raise HTTPException(status_code=422, detail="Indica como máximo 500 usuarios")
+    payload = ReminderInput(
+        content=content,
+        scheduled_for=_form_datetime(scheduled_for, required=True),
+        user_ids=raw_user_ids,
+        role_id=role_id,
+        announcement_id=announcement_id,
+        recurrence=recurrence,
+    )
+    reminder_id = await _create_reminder_record(
+        payload,
+        announcement_id,
+        await _read_attachments(files),
+    )
     return _reminder_payload(await _load_reminder(reminder_id))
 
 

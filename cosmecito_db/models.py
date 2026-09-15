@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Identity, Index, LargeBinary, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -40,6 +40,8 @@ class Announcement(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
+    recurrence: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
+    recurrence_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -47,6 +49,9 @@ class Announcement(Base):
         back_populates="announcement", cascade="all, delete-orphan"
     )
     reminders: Mapped[list[Reminder]] = relationship(
+        back_populates="announcement", cascade="all, delete-orphan"
+    )
+    attachments: Mapped[list[MessageAttachment]] = relationship(
         back_populates="announcement", cascade="all, delete-orphan"
     )
 
@@ -85,12 +90,17 @@ class Reminder(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     target_role_id: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(24), default="scheduled", nullable=False)
+    recurrence: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
+    recurrence_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     announcement: Mapped[Announcement | None] = relationship(back_populates="reminders")
     recipients: Mapped[list[ReminderRecipient]] = relationship(
+        back_populates="reminder", cascade="all, delete-orphan"
+    )
+    attachments: Mapped[list[MessageAttachment]] = relationship(
         back_populates="reminder", cascade="all, delete-orphan"
     )
 
@@ -114,6 +124,30 @@ class ReminderRecipient(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
     reminder: Mapped[Reminder] = relationship(back_populates="recipients")
+
+
+class MessageAttachment(Base):
+    """Archivo que se reenviará con un anuncio o recordatorio."""
+
+    __tablename__ = "message_attachments"
+    __table_args__ = (
+        Index("idx_message_attachments_announcement", "announcement_id"),
+        Index("idx_message_attachments_reminder", "reminder_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    announcement_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("announcements.id", ondelete="CASCADE")
+    )
+    reminder_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("reminders.id", ondelete="CASCADE")
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(255))
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    announcement: Mapped[Announcement | None] = relationship(back_populates="attachments")
+    reminder: Mapped[Reminder | None] = relationship(back_populates="attachments")
 
 
 class DataImport(Base):

@@ -91,9 +91,13 @@ services:
       - ${BOT_ENV_FILE:-.env}
     environment:
       QDRANT_URL: http://qdrant:6333
+      LLAMA_CPP_BASE_URL: http://chat:8080/v1
+      LLAMA_CPP_MODEL: ${CHAT_MODEL_FILE:-qwen2.5-1.5b-instruct-q4_k_m.gguf}
       RAG_EMBEDDING_BASE_URL: http://embeddings:8081/v1
       DATABASE_URL: postgresql+asyncpg://cosmecito:cosmecito_internal_only@postgres:5432/cosmecito
     depends_on:
+      chat:
+        condition: service_healthy
       qdrant:
         condition: service_started
       embeddings:

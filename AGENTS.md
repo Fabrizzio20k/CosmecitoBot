@@ -29,7 +29,7 @@ CosmecitoBot es un bot Discord para un curso. Tiene cuatro capacidades:
 Flujo principal:
 
 ```text
-Navegador → Caddy/proxy externo → UI Next.js → API FastAPI → Qdrant/PostgreSQL
+Navegador → Caddy/proxy externo → UI Next.js → API FastAPI → Qdrant/PostgreSQL/llama.cpp
 Discord   → bot Python ───────────────────────────────────→ PostgreSQL/Qdrant
 bot Python → llama.cpp (chat y embeddings)
 ```
@@ -45,7 +45,7 @@ privada predeterminada de Compose.
 | `postgres` | Base de datos de aplicación. | Volumen `postgres-data`. | Interna; no publica puertos. |
 | `migrations` | Aplica Alembic e importa el historial SQLite una vez. | Espera `postgres` saludable. | Job de una sola ejecución. |
 | `bot` | Bot de Discord, chat, scheduler de anuncios/recordatorios. | `migrations`, `chat`, `embeddings`, `qdrant`. | Conexión saliente a Discord. |
-| `api` | API FastAPI para documentos y anuncios. | `migrations`, `embeddings`, `qdrant`. | Sólo interna; la UI la consume. |
+| `api` | API FastAPI para documentos, anuncios y la previsualización de programación. | `migrations`, `chat`, `embeddings`, `qdrant`. | Sólo interna; la UI la consume. |
 | `ui` | Panel Next.js con autenticación de administrador. | `api`; `proxy_net`. | Único servicio accesible desde Caddy. |
 | `qdrant` | Colección vectorial para RAG. | Volumen `qdrant-storage`. | Interna. |
 | `chat` | `llama-server` para completions. | Volumen `llama-models`. | Interna, puerto 8080. |
@@ -66,7 +66,7 @@ la configuración de `postgres` y las tres URLs de conexión de `migrations`,
 
 | Volumen | Propietario | Contenido | Regla |
 |---|---|---|---|
-| `postgres-data` | `postgres` | Chats, anuncios, recordatorios y auditoría. | No borrar salvo que se quiera perder la base. |
+| `postgres-data` | `postgres` | Chats, anuncios, recordatorios, adjuntos y auditoría. | No borrar salvo que se quiera perder la base. |
 | `bot-state` | Legado | Antiguo `chat_history.sqlite3`. | Conservar hasta validar la importación inicial. |
 | `qdrant-storage` | `qdrant` | Vectores y payloads RAG. | Persistente e independiente de PostgreSQL. |
 | `llama-models` | Modelos | GGUF descargados. | No contiene datos de aplicación. |
@@ -88,8 +88,8 @@ Esquema actual:
 | Área | Tablas |
 |---|---|
 | Chat | `conversations`, `messages` |
-| Anuncios | `announcements`, `announcement_channels` |
-| Recordatorios | `reminders`, `reminder_recipients` |
+| Anuncios | `announcements`, `announcement_channels`, `message_attachments` |
+| Recordatorios | `reminders`, `reminder_recipients`, `message_attachments` |
 | Operación | `data_imports`, `alembic_version` |
 
 Las migraciones viven en `migrations/versions/`; la primera es
@@ -131,8 +131,10 @@ empaquetar antes ese módulo.
 
 ### Flujo de datos
 
-1. La UI hace `POST /announcements` con contenido, IDs de canal y fecha
-   opcional; la API registra un anuncio y uno o más `announcement_channels`.
+1. La UI interpreta una instrucción mediante `POST /schedules/parse` y crea el
+   mensaje con `POST /announcements/upload`, que registra contenido, adjuntos,
+   IDs de canal, fecha y recurrencia en un anuncio y sus
+   `announcement_channels`.
 2. El bot consulta cada 20 segundos entregas pendientes, las reclama con
    `FOR UPDATE SKIP LOCKED`, publica en Discord y registra `sent` o `failed`.
 3. La UI o `/recordatorio` crea un `Reminder` independiente con uno o varios
@@ -151,9 +153,12 @@ Rutas administrativas relevantes:
 |---|---|---|
 | `GET` | `/announcements` | Lista anuncios, canales, recordatorios y auditoría. |
 | `POST` | `/announcements` | Crea/publica o programa un anuncio de canal. |
+| `POST` | `/schedules/parse` | Interpreta una instrucción natural en hora Lima con el modelo local y devuelve una vista previa validada. |
+| `POST` | `/announcements/upload` | Crea un anuncio con adjuntos multipart. |
 | `GET` | `/announcements/{id}` | Devuelve un anuncio concreto. |
 | `POST` | `/announcements/{id}/reminders` | Programa DM para IDs de usuario y/o rol. |
 | `GET` / `POST` | `/reminders` | Lista o crea recordatorios independientes. |
+| `POST` | `/reminders/upload` | Crea un recordatorio con adjuntos multipart. |
 | `DELETE` | `/reminders/{id}` | Cancela un recordatorio pendiente. |
 | `DELETE` | `/announcements/{id}` | Cancela entregas y recordatorios aún pendientes. |
 
@@ -161,6 +166,14 @@ Los comandos Discord exigen `Manage Guild`. Para los destinatarios por rol,
 mantén activado **Server Members Intent** en el portal de Discord y en el bot;
 sin él no se puede expandir el rol de forma fiable. Los usuarios pueden cerrar
 sus DM: eso es una entrega fallida esperada y debe mostrarse, no ocultarse.
+
+La UI manda una instrucción natural al endpoint de previsualización; el modelo
+local sólo propone `fecha + hora + recurrencia`. La API rechaza respuestas
+ambiguas, fechas pasadas y recurrencias fuera de `daily`, `weekly` o `monthly`.
+La recurrencia se calcula de forma determinista en hora Lima y, al terminar una
+entrega, el bot crea transaccionalmente la siguiente ocurrencia. Los adjuntos se
+persisten en `message_attachments` (máximo 10; 8 MiB por archivo y 20 MiB por
+mensaje) y se copian a cada ocurrencia repetida.
 
 ## Configuración y secretos
 
